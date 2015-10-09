@@ -89,6 +89,7 @@ static void *copy_thread_no_hashmap(void *_me)
 			memcpy(dsthashmap + off * hash_size, hash, hash_size);
 
 			fprintf(stderr, "%Ld ", (long long)off);
+			progress_reported();
 
 			again = 1;
 		} else if (should_report_progress()) {
