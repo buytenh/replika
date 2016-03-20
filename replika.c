@@ -134,7 +134,17 @@ static void *copy_thread_hashmap(void *_me)
 			break;
 		}
 
-		fprintf(stderr, "%Ld ", (long long)off);
+		if (should_report_progress()) {
+			char str[256];
+			int ret;
+
+			ret = sprintf(str, "%Ld/%Ld", (long long)off,
+				      (long long)sizeblocks);
+			memset(str + ret, '\b', ret);
+			str[2 * ret] = 0;
+
+			fputs(str, stderr);
+		}
 
 		ret = xpread(fd_src, buf, block_size, off * block_size);
 
