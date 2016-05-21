@@ -28,9 +28,14 @@
 #include <semaphore.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <signal.h>
 #include "common.h"
 
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
+
+#define MAX_FREEZE 32
 
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
@@ -45,6 +50,56 @@ static int loop;
 static int max_iterations = 10;
 static off_t fd_off;
 static int again;
+static int freeze_fd[MAX_FREEZE];
+static const char *freeze_fs[MAX_FREEZE];
+
+volatile static int signal_quit_flag = 0;
+
+static void unfreeze_fs()
+{
+	int i;
+	fprintf(stderr, "thawing filesystems\n");
+	for (i = 0; i < MAX_FREEZE && freeze_fd[i] > -1; i++) {
+		if (ioctl(freeze_fd[i], FITHAW, 0)) {
+			fprintf(stderr, "error thawing fs %s (%s)\n",
+					freeze_fs[i], strerror(errno));
+			/* Continue thawing the remaining filesystems. */
+		}
+	}
+}
+
+static void sig_set_quit_flag(int sig)
+{
+	if (signal_quit_flag) {
+		signal(sig, SIG_DFL);
+		if (sig == SIGINT) {
+			static const char msg[] = "press ctrl-c again to "
+						  "force quit.\n";
+			write(1, msg, sizeof(msg) - 1);
+		}
+	} else {
+		signal_quit_flag = 1;
+	}
+}
+
+static int check_signal()
+{
+	if (signal_quit_flag == 1) {
+		fprintf(stderr, "signal caught; shutting down.\n");
+		signal_quit_flag = 2;
+	}
+	return signal_quit_flag;
+}
+
+
+static void setup_unfreeze()
+{
+	atexit(unfreeze_fs);
+	if (signal(SIGINT, SIG_IGN) != SIG_IGN)
+		signal(SIGINT, sig_set_quit_flag);
+	if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
+		signal(SIGTERM, sig_set_quit_flag);
+}
 
 static void *copy_thread_no_hashmap(void *_me)
 {
@@ -57,6 +112,11 @@ static void *copy_thread_no_hashmap(void *_me)
 		int ret;
 
 		xsem_wait(&me->sem0);
+
+		if (check_signal()) {
+			xsem_post(&me->next->sem0);
+			break;
+		}
 
 		off = fd_off;
 		if (off == sizeblocks) {
@@ -120,6 +180,11 @@ static void *copy_thread_hashmap(void *_me)
 
 		xsem_wait(&me->sem0);
 
+		if (check_signal()) {
+			xsem_post(&me->next->sem0);
+			break;
+		}
+
 		for (off = fd_off; off < sizeblocks; off++) {
 			if (memcmp(srchashmap + off * hash_size,
 				   dsthashmap + off * hash_size, hash_size)) {
@@ -174,10 +239,12 @@ int main(int argc, char *argv[])
 		{ "hash-algo", required_argument, 0, 'h' },
 		{ "hash-algorithm", required_argument, 0, 'h' },
 		{ "max-iter", required_argument, 0, 'i' },
+		{ "freeze", required_argument, 0, 'f' },
 		{ "loop", no_argument, 0, 'l' },
 		{ 0, 0, 0, 0 },
 	};
 	int i;
+	int freeze_count = 0;
 
 	gcry_control(GCRYCTL_SET_THREAD_CBS, &gcry_threads_pthread);
 
@@ -189,7 +256,7 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 
-		c = getopt_long(argc, argv, "b:h:i:l", long_options, NULL);
+		c = getopt_long(argc, argv, "b:h:i:f:l", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -228,6 +295,16 @@ int main(int argc, char *argv[])
 
 			break;
 
+		case 'f':
+			if (freeze_count == MAX_FREEZE) {
+				fprintf(stderr, "too many --freeze options\n");
+				return 1;
+			}
+
+			freeze_fs[freeze_count++] = optarg;
+
+			break;
+
 		case 'l':
 			loop = 1;
 			break;
@@ -247,6 +324,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
 		fprintf(stderr, " -i, --max-iter=ITER      maximum number of "
 				"iterations\n");
+		fprintf(stderr, " -f, --freeze=MOUNTPOINT  freeze "
+				"filesystem\n");
 		fprintf(stderr, " -l, --loop               create consistent "
 				"image copy\n");
 		return 1;
@@ -323,6 +402,32 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	if (freeze_count > 0) {
+		for (i = 0; i < MAX_FREEZE; i++)
+			freeze_fd[i] = -1;
+
+		setup_unfreeze();
+
+		fprintf(stderr, "freezing filesystems\n");
+		for (i = 0; i < freeze_count; i++) {
+			int fd = open(freeze_fs[i], O_RDONLY);
+			if (fd < 0) {
+				fprintf(stderr, "error opening freeze mount "
+						"point %s (%s)\n", freeze_fs[i],
+						strerror(errno));
+				return 1;
+			}
+
+			if (ioctl(fd, FIFREEZE, 0)) {
+				fprintf(stderr, "error freezing fs %s (%s)\n",
+						freeze_fs[i], strerror(errno));
+				return 1;
+			}
+
+			freeze_fd[i] = fd;
+		}
+	}
+
 	if (loop) {
 		for (i = 0; i < max_iterations; i++) {
 			fd_off = 0;
@@ -330,7 +435,8 @@ int main(int argc, char *argv[])
 
 			fprintf(stderr, "scanning for differences... ");
 			run_threads(copy_thread_no_hashmap);
-			fprintf(stderr, "done               \n");
+			if (!signal_quit_flag)
+				fprintf(stderr, "done               \n");
 
 			if (!again)
 				break;
@@ -353,7 +459,8 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "copying differences... ");
 			run_threads(copy_thread_hashmap);
 		}
-		fprintf(stderr, "done               \n");
+		if (!signal_quit_flag)
+			fprintf(stderr, "done               \n");
 	}
 
 	fprintf(stderr, "flushing buffers... ");
