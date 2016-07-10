@@ -88,10 +88,9 @@ static void sig_set_quit_flag(int sig)
 
 static int check_signal()
 {
-	if (signal_quit_flag == 1) {
+	if (signal_quit_flag)
 		fprintf(stderr, "signal caught; shutting down.\n");
-		signal_quit_flag = 2;
-	}
+
 	return signal_quit_flag;
 }
 
@@ -117,13 +116,14 @@ static void *copy_thread_no_hashmap(void *_me)
 
 		xsem_wait(&me->sem0);
 
-		if (check_signal()) {
+		off = fd_off;
+		if (off == sizeblocks) {
 			xsem_post(&me->next->sem0);
 			break;
 		}
 
-		off = fd_off;
-		if (off == sizeblocks) {
+		if (check_signal()) {
+			fd_off = sizeblocks;
 			xsem_post(&me->next->sem0);
 			break;
 		}
@@ -184,11 +184,6 @@ static void *copy_thread_hashmap(void *_me)
 
 		xsem_wait(&me->sem0);
 
-		if (check_signal()) {
-			xsem_post(&me->next->sem0);
-			break;
-		}
-
 		for (off = fd_off; off < sizeblocks; off++) {
 			if (memcmp(srchashmap + off * hash_size,
 				   dsthashmap + off * hash_size, hash_size)) {
@@ -196,7 +191,7 @@ static void *copy_thread_hashmap(void *_me)
 			}
 		}
 
-		if (off == sizeblocks) {
+		if (off == sizeblocks || check_signal()) {
 			fd_off = sizeblocks;
 			xsem_post(&me->next->sem0);
 			break;
