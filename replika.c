@@ -55,7 +55,7 @@ static const char *freeze_fs[MAX_FREEZE];
 
 volatile static int signal_quit_flag = 0;
 
-static void unfreeze_fs()
+static void thaw_fs(void)
 {
 	int i;
 	fprintf(stderr, "thawing filesystems\n");
@@ -92,9 +92,9 @@ static int check_signal()
 }
 
 
-static void setup_unfreeze()
+static void setup_thaw()
 {
-	atexit(unfreeze_fs);
+	atexit(thaw_fs);
 	if (signal(SIGINT, SIG_IGN) != SIG_IGN)
 		signal(SIGINT, sig_set_quit_flag);
 	if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
@@ -406,7 +406,7 @@ int main(int argc, char *argv[])
 		for (i = 0; i < MAX_FREEZE; i++)
 			freeze_fd[i] = -1;
 
-		setup_unfreeze();
+		setup_thaw();
 
 		fprintf(stderr, "freezing filesystems\n");
 		for (i = 0; i < freeze_count; i++) {
