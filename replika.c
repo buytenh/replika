@@ -24,18 +24,22 @@
 #include <fcntl.h>
 #include <gcrypt.h>
 #include <getopt.h>
+#include <linux/fs.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <stdint.h>
-#include <unistd.h>
-#include <linux/fs.h>
-#include <sys/ioctl.h>
 #include <signal.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #include "common.h"
 
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
 
-#define MAX_FREEZE 32
+#define MAX_FREEZE	32
+
+static volatile int signal_quit_flag;
+static const char *freeze_fs[MAX_FREEZE];
+static int freeze_fd[MAX_FREEZE];
 
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
@@ -50,15 +54,13 @@ static int loop;
 static int max_iterations = 10;
 static off_t fd_off;
 static int again;
-static int freeze_fd[MAX_FREEZE];
-static const char *freeze_fs[MAX_FREEZE];
-
-volatile static int signal_quit_flag = 0;
 
 static void thaw_fs(void)
 {
 	int i;
+
 	fprintf(stderr, "thawing filesystems\n");
+
 	for (i = 0; i < MAX_FREEZE && freeze_fd[i] > -1; i++) {
 		if (ioctl(freeze_fd[i], FITHAW, 0) < 0) {
 			fprintf(stderr, "error thawing fs %s (%s)\n",
@@ -86,7 +88,7 @@ static void sig_set_quit_flag(int sig)
 	}
 }
 
-static int check_signal()
+static int check_signal(void)
 {
 	if (signal_quit_flag)
 		fprintf(stderr, "signal caught; shutting down.\n");
@@ -320,11 +322,11 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s: [opts] <src> <srchashmap> <dst> "
 				"<dsthashmap>\n", argv[0]);
 		fprintf(stderr, " -b, --block-size=SIZE    hash block size\n");
+		fprintf(stderr, " -f, --freeze=MOUNTPOINT  freeze "
+				"filesystem\n");
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
 		fprintf(stderr, " -i, --max-iter=ITER      maximum number of "
 				"iterations\n");
-		fprintf(stderr, " -f, --freeze=MOUNTPOINT  freeze "
-				"filesystem\n");
 		fprintf(stderr, " -l, --loop               create consistent "
 				"image copy\n");
 		return 1;
@@ -401,15 +403,18 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (freeze_count > 0) {
+	if (freeze_count) {
 		for (i = 0; i < MAX_FREEZE; i++)
 			freeze_fd[i] = -1;
 
 		setup_thaw();
 
 		fprintf(stderr, "freezing filesystems\n");
+
 		for (i = 0; i < freeze_count; i++) {
-			int fd = open(freeze_fs[i], O_RDONLY);
+			int fd;
+
+			fd = open(freeze_fs[i], O_RDONLY);
 			if (fd < 0) {
 				fprintf(stderr, "error opening freeze mount "
 						"point %s (%s)\n", freeze_fs[i],
