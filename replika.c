@@ -60,7 +60,7 @@ static void thaw_fs(void)
 	int i;
 	fprintf(stderr, "thawing filesystems\n");
 	for (i = 0; i < MAX_FREEZE && freeze_fd[i] > -1; i++) {
-		if (ioctl(freeze_fd[i], FITHAW, 0)) {
+		if (ioctl(freeze_fd[i], FITHAW, 0) < 0) {
 			fprintf(stderr, "error thawing fs %s (%s)\n",
 					freeze_fs[i], strerror(errno));
 			/* Continue thawing the remaining filesystems. */
@@ -418,7 +418,7 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 
-			if (ioctl(fd, FIFREEZE, 0)) {
+			if (ioctl(fd, FIFREEZE, 0) < 0) {
 				fprintf(stderr, "error freezing fs %s (%s)\n",
 						freeze_fs[i], strerror(errno));
 				return 1;
