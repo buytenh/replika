@@ -68,15 +68,19 @@ static void thaw_fs(void)
 	}
 }
 
+static void stderr_print(const char *msg)
+{
+	write(1, msg, strlen(msg));
+}
+
 static void sig_set_quit_flag(int sig)
 {
 	if (signal_quit_flag) {
 		signal(sig, SIG_DFL);
-		if (sig == SIGINT) {
-			static const char msg[] = "press ctrl-c again to "
-						  "force quit.\n";
-			write(1, msg, sizeof(msg) - 1);
-		}
+		if (sig == SIGINT)
+			stderr_print("press ctrl-c again to force quit.\n");
+		else
+			stderr_print("send SIGTERM again to force quit.\n");
 	} else {
 		signal_quit_flag = 1;
 	}
