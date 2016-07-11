@@ -88,15 +88,6 @@ static void sig_set_quit_flag(int sig)
 	}
 }
 
-static int check_signal(void)
-{
-	if (signal_quit_flag)
-		fprintf(stderr, "signal caught; shutting down.\n");
-
-	return signal_quit_flag;
-}
-
-
 static void setup_thaw()
 {
 	atexit(thaw_fs);
@@ -104,6 +95,14 @@ static void setup_thaw()
 		signal(SIGINT, sig_set_quit_flag);
 	if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
 		signal(SIGTERM, sig_set_quit_flag);
+}
+
+static int check_signal(void)
+{
+	if (signal_quit_flag)
+		fprintf(stderr, "signal caught; shutting down.\n");
+
+	return signal_quit_flag;
 }
 
 static void *copy_thread_no_hashmap(void *_me)
