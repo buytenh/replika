@@ -57,21 +57,6 @@ static int again;
 static off_t mismatch_idx;
 static off_t mismatch_cnt;
 
-static void thaw_fs(void)
-{
-	int i;
-
-	fprintf(stderr, "thawing filesystems\n");
-
-	for (i = 0; i < MAX_FREEZE && freeze_fd[i] > -1; i++) {
-		if (ioctl(freeze_fd[i], FITHAW, 0) < 0) {
-			fprintf(stderr, "error thawing fs %s (%s)\n",
-					freeze_fs[i], strerror(errno));
-			/* Continue thawing the remaining filesystems. */
-		}
-	}
-}
-
 static void stderr_print(const char *msg)
 {
 	write(1, msg, strlen(msg));
@@ -90,13 +75,27 @@ static void sig_set_quit_flag(int sig)
 	}
 }
 
-static void setup_thaw()
+static void setup_sig_handlers(void)
 {
-	atexit(thaw_fs);
 	if (signal(SIGINT, SIG_IGN) != SIG_IGN)
 		signal(SIGINT, sig_set_quit_flag);
 	if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
 		signal(SIGTERM, sig_set_quit_flag);
+}
+
+static void thaw_fs(void)
+{
+	int i;
+
+	fprintf(stderr, "thawing filesystems\n");
+
+	for (i = 0; i < MAX_FREEZE && freeze_fd[i] > -1; i++) {
+		if (ioctl(freeze_fd[i], FITHAW, 0) < 0) {
+			fprintf(stderr, "error thawing fs %s (%s)\n",
+					freeze_fs[i], strerror(errno));
+			/* Continue thawing the remaining filesystems. */
+		}
+	}
 }
 
 static int check_signal(void)
@@ -419,11 +418,13 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	setup_sig_handlers();
+
 	if (freeze_count) {
 		for (i = 0; i < MAX_FREEZE; i++)
 			freeze_fd[i] = -1;
 
-		setup_thaw();
+		atexit(thaw_fs);
 
 		fprintf(stderr, "freezing filesystems\n");
 
