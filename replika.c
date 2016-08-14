@@ -54,6 +54,8 @@ static int loop;
 static int max_iterations = 10;
 static off_t fd_off;
 static int again;
+static off_t mismatch_idx;
+static off_t mismatch_cnt;
 
 static void thaw_fs(void)
 {
@@ -203,8 +205,11 @@ static void *copy_thread_hashmap(void *_me)
 			char str[256];
 			int ret;
 
-			ret = sprintf(str, "%Ld/%Ld", (long long)off,
-				      (long long)sizeblocks);
+			ret = sprintf(str, "%Ld/%Ld (%Ld/%Ld mismatches)",
+				      (long long)off,
+				      (long long)sizeblocks,
+				      (long long)mismatch_idx,
+				      (long long)mismatch_cnt);
 			memset(str + ret, '\b', ret);
 			str[2 * ret] = 0;
 
@@ -214,6 +219,7 @@ static void *copy_thread_hashmap(void *_me)
 		ret = xpread(fd_src, buf, block_size, off * block_size);
 
 		fd_off = off + 1;
+		mismatch_idx++;
 
 		xsem_post(&me->next->sem0);
 
@@ -449,8 +455,10 @@ int main(int argc, char *argv[])
 
 			fprintf(stderr, "scanning for differences... ");
 			run_threads(copy_thread_no_hashmap);
-			if (!signal_quit_flag)
-				fprintf(stderr, "done               \n");
+			if (!signal_quit_flag) {
+				fprintf(stderr, "done                      "
+						"                          \n");
+			}
 
 			if (!again)
 				break;
@@ -470,11 +478,26 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "scanning for differences... ");
 			run_threads(copy_thread_no_hashmap);
 		} else {
+			off_t off;
+
+			mismatch_idx = 0;
+
+			mismatch_cnt = 0;
+			for (off = 0; off < sizeblocks; off++) {
+				if (memcmp(srchashmap + off * hash_size,
+					   dsthashmap + off * hash_size,
+					   hash_size)) {
+					mismatch_cnt++;
+				}
+			}
+
 			fprintf(stderr, "copying differences... ");
 			run_threads(copy_thread_hashmap);
 		}
-		if (!signal_quit_flag)
-			fprintf(stderr, "done               \n");
+		if (!signal_quit_flag) {
+			fprintf(stderr, "done                      "
+					"                          \n");
+		}
 	}
 
 	fprintf(stderr, "flushing buffers... ");
