@@ -507,5 +507,5 @@ int main(int argc, char *argv[])
 	close(fd_dsthashmap);
 	fprintf(stderr, "done\n");
 
-	return 0;
+	return signal_quit_flag ? EXIT_FAILURE : EXIT_SUCCESS;
 }
