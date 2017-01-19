@@ -393,6 +393,8 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	setup_sig_handlers();
+
 	hash_size = gcry_md_get_algo_dlen(hash_algo);
 
 	fd_src = open(argv[optind], O_RDONLY);
@@ -460,8 +462,6 @@ int main(int argc, char *argv[])
 
 	memset(dsthashmap, 0, sizeblocks * hash_size);
 	read(fd_dsthashmap, dsthashmap, sizeblocks * hash_size);
-
-	setup_sig_handlers();
 
 	if (freeze_count) {
 		for (i = 0; i < MAX_FREEZE; i++)
