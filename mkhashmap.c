@@ -64,7 +64,7 @@ static void *hash_thread(void *_me)
 
 		if (ret < block_size && off != sizeblocks - 1) {
 			fprintf(stderr, "short read\n");
-			break;
+			return NULL;
 		}
 
 		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
