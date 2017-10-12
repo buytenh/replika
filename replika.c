@@ -412,11 +412,8 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (read(fd_dsthashmap, dsthashmap, sizeblocks * hash_size)
-	    != sizeblocks * hash_size) {
-		fprintf(stderr, "error reading hash map\n");
-		return 1;
-	}
+	memset(dsthashmap, 0, sizeblocks * hash_size);
+	read(fd_dsthashmap, dsthashmap, sizeblocks * hash_size);
 
 	setup_sig_handlers();
 
