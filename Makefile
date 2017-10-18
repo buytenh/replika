@@ -1,7 +1,10 @@
-all:		mkhashmap mkhashmapref mkrand replika
+all:		dedup mkhashmap mkhashmapref mkrand replika
 
 clean:
-		rm -f mkhashmap mkhashmapref mkrand replika
+		rm -f dedup mkhashmap mkhashmapref mkrand replika
+
+dedup:		dedup.c common.c common.h
+		gcc -Wall -o dedup dedup.c common.c `libgcrypt-config --cflags --libs` `pkg-config --cflags --libs ivykis` -lpthread
 
 mkhashmap:	mkhashmap.c common.c common.h
 		gcc -Wall -o mkhashmap mkhashmap.c common.c `libgcrypt-config --cflags --libs` -lpthread
