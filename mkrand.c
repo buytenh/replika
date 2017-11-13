@@ -131,6 +131,7 @@ int main(int argc, char *argv[])
 	};
 	int fd_key;
 	long long lltemp;
+	int ret;
 
 	gcry_control(GCRYCTL_SET_THREAD_CBS, &gcry_threads_pthread);
 
@@ -210,7 +211,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	fd_hashmap = open(argv[optind + 1], O_CREAT | O_WRONLY, 0666);
+	fd_hashmap = open(argv[optind + 1], O_CREAT | O_RDWR, 0666);
 	if (fd_hashmap < 0) {
 		perror("opening hashmap");
 		return 1;
@@ -261,6 +262,11 @@ int main(int argc, char *argv[])
 	}
 
 	fprintf(stderr, "writing random data... ");
+	ret = posix_fallocate(fd_hashmap, 0, sizeblocks * hash_size);
+	if (ret) {
+		fprintf(stderr, "posix_fallocate(hashmap): %s\n",
+			strerror(ret));
+	}
 	run_threads(mkrand_thread);
 	fprintf(stderr, "done               \n");
 
