@@ -35,7 +35,6 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
 
 static int block_size = 1048576;
 static int cipher_algo = GCRY_CIPHER_AES128;
-static int cipher_blk_size;
 static int key_size;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
@@ -200,9 +199,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	cipher_blk_size = gcry_cipher_get_algo_blklen(cipher_algo);
 	key_size = gcry_cipher_get_algo_keylen(cipher_algo);
-
 	hash_size = gcry_md_get_algo_dlen(hash_algo);
 
 	fd_dst = open(argv[optind], O_CREAT | O_WRONLY, 0666);
