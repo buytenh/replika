@@ -52,6 +52,7 @@ struct efes_file_info
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
 
 static int block_size = 1048576;
+static int defrag_dirty_blocks;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
 
@@ -231,7 +232,7 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 	free(mappath);
 
-	printf("resumming %s (%Ld dirty blocks)\n",
+	printf("committing %s (%Ld dirty blocks)\n",
 	       path + 1, (long long)num_dirty);
 
 	dirty_index = 0;
@@ -245,7 +246,7 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 		dirty_index++;
 		if (should_report_progress()) {
-			printf("resumming %Ld/%Ld (%Ld/%Ld dirty blocks)\n",
+			printf("committing %Ld/%Ld (%Ld/%Ld dirty blocks)\n",
 			       (long long)i,
 			       (long long)fh->numblocks,
 			       (long long)dirty_index,
@@ -259,12 +260,15 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 			break;
 		}
 
+		if (defrag_dirty_blocks)
+			xpwrite(fh->fd, buf, ret, i * block_size);
+
 		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 
 		xpwrite(mapfd, hash, hash_size, i * hash_size);
 	}
 
-	printf("resumming done\n\n");
+	printf("commit done\n\n");
 
 	close(mapfd);
 }
@@ -392,6 +396,7 @@ static void usage(const char *progname)
 "         --help            print help\n"
 "    -V   --version         print version\n"
 "    -b   --block-size=x    hash block size\n"
+"         --defrag          defragment written blocks on image close\n"
 "    -h   --hash-algo=x     hash algorithm\n"
 "\n", progname);
 }
@@ -405,6 +410,7 @@ struct efes_param
 {
 	char	*backing_dir;
 	int	block_size;
+	int	defrag_dirty_blocks;
 	char	*hash_algo;
 };
 
@@ -413,6 +419,7 @@ struct efes_param
 static struct fuse_opt efes_opts[] = {
 	EFES_OPT("-b %u",		block_size),
 	EFES_OPT("--block-size=%u",	block_size),
+	EFES_OPT("--defrag",		defrag_dirty_blocks),
 	EFES_OPT("-h %s",		hash_algo),
 	EFES_OPT("--hash-algo=%s",	hash_algo),
 	FUSE_OPT_KEY("--help",		KEY_HELP),
@@ -483,6 +490,9 @@ int main(int argc, char *argv[])
 		}
 		block_size = param.block_size;
 	}
+
+	if (param.defrag_dirty_blocks)
+		defrag_dirty_blocks = 1;
 
 	if (param.hash_algo != NULL) {
 		hash_algo = gcry_md_map_name(param.hash_algo);
