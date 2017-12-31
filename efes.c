@@ -471,7 +471,7 @@ int main(int argc, char *argv[])
 
 	if (param.backing_dir == NULL) {
 		fprintf(stderr, "missing backing dir\n");
-		fprintf(stderr, "see '%s -h' for usage\n", argv[0]);
+		fprintf(stderr, "see '%s --help' for usage\n", argv[0]);
 		exit(1);
 	}
 
