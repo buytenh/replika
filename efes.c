@@ -45,6 +45,7 @@ struct efes_file_info
 {
 	int		imgfd;
 	int		writable;
+	int		mapfd;
 	uint64_t	numblocks;
 	int		dirty;
 	uint8_t		dirty_block[0];
@@ -98,6 +99,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	int imgfd;
 	struct stat buf;
 	int ret;
+	int mapfd;
 	uint64_t numblocks;
 	struct efes_file_info *fh;
 
@@ -120,9 +122,27 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	if (imgfd < 0)
 		return -errno;
 
+	mapfd = -1;
+	if (writable) {
+		char mappath[len + 1];
+
+		strcpy(mappath, path);
+		strcpy(mappath + len - 4, ".map");
+
+		mapfd = openat(backing_dir_fd, mappath + 1, O_WRONLY);
+		if (mapfd < 0) {
+			fprintf(stderr, "efes_open: mapfile %s openat %s\n",
+				mappath, strerror(errno));
+			close(imgfd);
+			return -EPERM;
+		}
+	}
+
 	ret = fstat(imgfd, &buf);
 	if (ret < 0) {
 		ret = -errno;
+		if (writable)
+			close(mapfd);
 		close(imgfd);
 		return ret;
 	}
@@ -131,12 +151,15 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 	fh = malloc(sizeof(*fh) + (writable ? numblocks : 0));
 	if (fh == NULL) {
+		if (writable)
+			close(mapfd);
 		close(imgfd);
 		return -ENOMEM;
 	}
 
 	fh->imgfd = imgfd;
 	fh->writable = writable;
+	fh->mapfd = mapfd;
 	fh->numblocks = numblocks;
 	fh->dirty = 0;
 	if (writable)
@@ -218,9 +241,6 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 {
 	uint64_t num_dirty;
 	uint64_t i;
-	int len;
-	char *mappath;
-	int mapfd;
 	uint64_t dirty_index;
 
 	num_dirty = 0;
@@ -231,25 +251,6 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 	if (!num_dirty)
 		return;
-
-	len = strlen(path);
-	if (len < 5 || strcmp(path + len - 4, ".img")) {
-		fprintf(stderr, "update_mapfile: called with [%s]\n", path);
-		abort();
-	}
-
-	mappath = strdup(path);
-	strcpy(mappath + len - 4, ".map");
-
-	mapfd = openat(backing_dir_fd, mappath + 1, O_WRONLY);
-	if (mapfd < 0) {
-		fprintf(stderr, "update_mapfile: mapfile %s openat %s\n",
-			mappath, strerror(errno));
-		free(mappath);
-		return;
-	}
-
-	free(mappath);
 
 	printf("committing %s (%Ld dirty blocks)\n",
 	       path + 1, (long long)num_dirty);
@@ -284,21 +285,21 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 
-		xpwrite(mapfd, hash, hash_size, i * hash_size);
+		xpwrite(fh->mapfd, hash, hash_size, i * hash_size);
 	}
 
 	printf("commit done\n\n");
-
-	close(mapfd);
 }
 
 static int efes_release(const char *path, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
 
-	if (fh->dirty)
-		update_mapfile(fh, path);
-
+	if (fh->writable) {
+		if (fh->dirty)
+			update_mapfile(fh, path);
+		close(fh->mapfd);
+	}
 	close(fh->imgfd);
 	free(fh);
 
