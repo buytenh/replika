@@ -43,7 +43,7 @@
 
 struct efes_file_info
 {
-	int		fd;
+	int		imgfd;
 	int		writable;
 	uint64_t	numblocks;
 	int		dirty;
@@ -95,7 +95,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	int len;
 	int writable;
 	int flags;
-	int fd;
+	int imgfd;
 	struct stat buf;
 	int ret;
 	uint64_t numblocks;
@@ -116,14 +116,14 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	if ((flags & O_ACCMODE) == O_WRONLY)
 		flags = (flags & ~O_ACCMODE) | O_RDWR;
 
-	fd = openat(backing_dir_fd, path + 1, flags);
-	if (fd < 0)
+	imgfd = openat(backing_dir_fd, path + 1, flags);
+	if (imgfd < 0)
 		return -errno;
 
-	ret = fstat(fd, &buf);
+	ret = fstat(imgfd, &buf);
 	if (ret < 0) {
 		ret = -errno;
-		close(fd);
+		close(imgfd);
 		return ret;
 	}
 
@@ -131,11 +131,11 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 	fh = malloc(sizeof(*fh) + (writable ? numblocks : 0));
 	if (fh == NULL) {
-		close(fd);
+		close(imgfd);
 		return -ENOMEM;
 	}
 
-	fh->fd = fd;
+	fh->imgfd = imgfd;
 	fh->writable = writable;
 	fh->numblocks = numblocks;
 	fh->dirty = 0;
@@ -152,7 +152,7 @@ static int efes_read(const char *path, char *buf, size_t size,
 {
 	struct efes_file_info *fh = (void *)fi->fh;
 
-	return pread(fh->fd, buf, size, offset);
+	return pread(fh->imgfd, buf, size, offset);
 }
 
 static int efes_write(const char *path, const char *buf, size_t size,
@@ -181,7 +181,7 @@ static int efes_write(const char *path, const char *buf, size_t size,
 		if (towrite > block_size - (offset % block_size))
 			towrite = block_size - (offset % block_size);
 
-		ret = pwrite(fh->fd, buf, towrite, offset);
+		ret = pwrite(fh->imgfd, buf, towrite, offset);
 		if (ret < 0)
 			return written ? written : -errno;
 
@@ -272,7 +272,7 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 			       (long long)num_dirty);
 		}
 
-		ret = xpread(fh->fd, buf, block_size, i * block_size);
+		ret = xpread(fh->imgfd, buf, block_size, i * block_size);
 		if (ret < block_size && i != fh->numblocks - 1) {
 			fprintf(stderr, "update_mapfile: short read on "
 					"block %Ld\n", (long long)i);
@@ -280,7 +280,7 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 		}
 
 		if (defrag_dirty_blocks)
-			xpwrite(fh->fd, buf, ret, i * block_size);
+			xpwrite(fh->imgfd, buf, ret, i * block_size);
 
 		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 
@@ -299,7 +299,7 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 	if (fh->dirty)
 		update_mapfile(fh, path);
 
-	close(fh->fd);
+	close(fh->imgfd);
 	free(fh);
 
 	return 0;
