@@ -1,6 +1,6 @@
 /*
  * replika, a set of tools for dealing with hashmapped disk images
- * Copyright (C) 2017 Lennert Buytenhek
+ * Copyright (C) 2017, 2018 Lennert Buytenhek
  *
  * This library is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version
@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -55,9 +56,14 @@ static int block_size = 1048576;
 static int defrag_dirty_blocks;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
+static int trim_cipher_algo = GCRY_CIPHER_AES128;
+static int trim_key_size;
 
 static int backing_dir_fd;
 static pthread_mutex_t readdir_lock;
+static pthread_mutex_t gcrypt_lock;
+static int trim_fill;
+static uint8_t trim_key[64];
 
 static int efes_getattr(const char *path, struct stat *buf)
 {
@@ -364,11 +370,122 @@ out:
 }
 
 #if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 9)
+static ssize_t xwrite(const char *path, const void *buf, size_t size,
+		      off_t offset, struct fuse_file_info *fi)
+{
+	size_t written;
+
+	written = 0;
+	while (written < size) {
+		int ret;
+
+		ret = efes_write(path, buf, size - written, offset, fi);
+		if (ret < 0)
+			return written ? written : -errno;
+
+		if (ret == 0)
+			break;
+
+		buf += ret;
+		offset += ret;
+
+		written += ret;
+	}
+
+	return written;
+}
+
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
+	uint64_t zero = 0;
+	gcry_cipher_hd_t hd;
+
 	if (!(mode & FALLOC_FL_PUNCH_HOLE))
 		return -EINVAL;
+
+	if (!trim_fill)
+		return 0;
+
+	/*
+	 * libgcrypt 1.6.3 segfaults if gcry_cipher_open() calls
+	 * are not strictly serialised.
+	 */
+	pthread_mutex_lock(&gcrypt_lock);
+
+	if (gcry_cipher_open(&hd, trim_cipher_algo, GCRY_CIPHER_MODE_ECB, 0)) {
+		fprintf(stderr, "efes_fallocate: error opening cipher\n");
+		pthread_mutex_unlock(&gcrypt_lock);
+		return -EIO;
+	}
+
+	if (gcry_cipher_setkey(hd, trim_key, trim_key_size)) {
+		fprintf(stderr, "efes_fallocate: error setting key\n");
+		gcry_cipher_close(hd);
+		pthread_mutex_unlock(&gcrypt_lock);
+		return -EIO;
+	}
+
+	pthread_mutex_unlock(&gcrypt_lock);
+
+	if (offset & 7) {
+		int towrite;
+
+		towrite = 8 - (offset & 7);
+		if (towrite > len)
+			towrite = len;
+
+		if (xwrite(path, &zero, towrite, offset, fi) != towrite) {
+			gcry_cipher_close(hd);
+			return -EIO;
+		}
+
+		offset += towrite;
+		len -= towrite;
+	}
+
+	while (len >= 8) {
+		uint8_t buf[block_size];
+		size_t towrite;
+		uint64_t ctr;
+		uint32_t *ptr;
+		int i;
+
+		towrite = len & ~7ULL;
+		if (towrite > sizeof(buf) - (offset % sizeof(buf)))
+			towrite = sizeof(buf) - (offset % sizeof(buf));
+
+		ctr = offset / 8;
+		ptr = (uint32_t *)buf;
+
+		for (i = 0; i < towrite; i += 8) {
+			*ptr++ = htonl(ctr >> 32);
+			*ptr++ = htonl(ctr & 0xffffffff);
+			ctr++;
+		}
+
+		if (gcry_cipher_encrypt(hd, buf, towrite, buf, towrite)) {
+			fprintf(stderr, "efes_fallocate: error "
+					"encrypting block\n");
+			gcry_cipher_close(hd);
+			return -EIO;
+		}
+
+		if (xwrite(path, buf, towrite, offset, fi) != towrite) {
+			gcry_cipher_close(hd);
+			return -EIO;
+		}
+
+		offset += towrite;
+		len -= towrite;
+	}
+
+	if (len && xwrite(path, &zero, len, offset, fi) != len) {
+		gcry_cipher_close(hd);
+		return -EIO;
+	}
+
+	gcry_cipher_close(hd);
 
 	return 0;
 }
@@ -398,6 +515,8 @@ static void usage(const char *progname)
 "    -b   --block-size=x    hash block size\n"
 "         --defrag          defragment written blocks on image close\n"
 "    -h   --hash-algo=x     hash algorithm\n"
+"         --trim-cipher=x   trim fill cipher\n"
+"         --trim-key-file=x trim fill key file\n"
 "\n", progname);
 }
 
@@ -412,6 +531,8 @@ struct efes_param
 	int	block_size;
 	int	defrag_dirty_blocks;
 	char	*hash_algo;
+	char	*trim_cipher;
+	char	*trim_key_file;
 };
 
 #define EFES_OPT(t, o)	{ t, offsetof(struct efes_param, o), -1, }
@@ -422,6 +543,8 @@ static struct fuse_opt efes_opts[] = {
 	EFES_OPT("--defrag",		defrag_dirty_blocks),
 	EFES_OPT("-h %s",		hash_algo),
 	EFES_OPT("--hash-algo=%s",	hash_algo),
+	EFES_OPT("--trim-cipher=%s",	trim_cipher),
+	EFES_OPT("--trim-key-file=%s",	trim_key_file),
 	FUSE_OPT_KEY("--help",		KEY_HELP),
 	FUSE_OPT_KEY("-V",		KEY_VERSION),
 	FUSE_OPT_KEY("--version",	KEY_VERSION),
@@ -502,8 +625,17 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 	}
-
 	hash_size = gcry_md_get_algo_dlen(hash_algo);
+
+	if (param.trim_cipher != NULL) {
+		trim_cipher_algo = gcry_cipher_map_name(param.trim_cipher);
+		if (trim_cipher_algo == 0) {
+			fprintf(stderr, "unknown cipher algorithm "
+					"name: %s\n", param.trim_cipher);
+			return 1;
+		}
+	}
+	trim_key_size = gcry_cipher_get_algo_keylen(trim_cipher_algo);
 
 	backing_dir_fd = open(param.backing_dir, O_RDONLY | O_DIRECTORY);
 	if (backing_dir_fd < 0) {
@@ -513,12 +645,44 @@ int main(int argc, char *argv[])
 
 	pthread_mutex_init(&readdir_lock, NULL);
 
+	pthread_mutex_init(&gcrypt_lock, NULL);
+
+	if (param.trim_key_file != NULL) {
+		int fd;
+		int ret;
+
+		trim_fill = 1;
+
+		fd = open(param.trim_key_file, O_RDONLY);
+		if (fd < 0) {
+			fprintf(stderr, "cannot open trim key file %s: %s\n",
+				param.trim_key_file, strerror(errno));
+			return 1;
+		}
+
+		ret = read(fd, trim_key, trim_key_size);
+		if (ret != trim_key_size) {
+			fprintf(stderr, "cannot read trim key file: "
+					"read %d bytes, wanted %d\n",
+				ret, trim_key_size);
+			return 1;
+		}
+
+		close(fd);
+	}
+
 	ret = fuse_main(args.argc, args.argv, &efes_oper, NULL);
+
+	memset(trim_key, 0, sizeof(trim_key));
 
 	fuse_opt_free_args(&args);
 	free(param.backing_dir);
 	if (param.hash_algo != NULL)
 		free(param.hash_algo);
+	if (param.trim_cipher != NULL)
+		free(param.trim_cipher);
+	if (param.trim_key_file != NULL)
+		free(param.trim_key_file);
 
 	return ret;
 }
