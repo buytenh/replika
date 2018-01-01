@@ -79,11 +79,20 @@ static int efes_getattr(const char *path, struct stat *buf)
 	if (ret < 0)
 		return -errno;
 
+	if ((buf->st_mode & S_IFMT) == S_IFREG) {
+		int len;
+
+		len = strlen(path);
+		if (len < 6 || strcmp(path + len - 4, ".img"))
+			return -ENOENT;
+	}
+
 	return 0;
 }
 
 static int efes_open(const char *path, struct fuse_file_info *fi)
 {
+	int len;
 	int writable;
 	int flags;
 	int fd;
@@ -96,6 +105,10 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 		fprintf(stderr, "open called with [%s]\n", path);
 		return -ENOENT;
 	}
+
+	len = strlen(path);
+	if (len < 6 || strcmp(path + len - 4, ".img"))
+		return -ENOENT;
 
 	writable = !((fi->flags & O_ACCMODE) == O_RDONLY);
 
