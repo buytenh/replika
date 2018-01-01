@@ -140,7 +140,7 @@ static int efes_write(const char *path, const char *buf, size_t size,
 		      off_t offset, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
-	off_t off;
+	off_t written;
 
 	if (!fh->writable)
 		return -EBADF;
@@ -148,35 +148,35 @@ static int efes_write(const char *path, const char *buf, size_t size,
 	if (size > INT_MAX)
 		size = INT_MAX;
 
-	off = 0;
-	while (off < size) {
+	written = 0;
+	while (written < size) {
 		off_t block;
-		off_t block_end;
 		size_t towrite;
 		int ret;
 
-		block = (offset + off) / block_size;
+		block = offset / block_size;
 		if (block >= fh->numblocks)
 			break;
 
-		block_end = (block + 1) * block_size;
-		if (offset + size > block_end)
-			towrite = block_end - offset - off;
-		else
-			towrite = size - off;
+		towrite = size - written;
+		if (towrite > block_size - (offset % block_size))
+			towrite = block_size - (offset % block_size);
 
-		ret = pwrite(fh->fd, buf + off, towrite, offset + off);
+		ret = pwrite(fh->fd, buf, towrite, offset);
 		if (ret < 0)
-			return off ? off : -errno;
+			return written ? written : -errno;
 
 		if (!fh->dirty)
 			fh->dirty = 1;
 		fh->dirty_block[block] = 1;
 
-		off += ret;
+		buf += ret;
+		offset += ret;
+
+		written += ret;
 	}
 
-	return off;
+	return written;
 }
 
 static int efes_statfs(const char *path, struct statvfs *buf)
