@@ -208,9 +208,18 @@ static int efes_write(const char *path, const char *buf, size_t size,
 		if (ret < 0)
 			return written ? written : -errno;
 
-		if (!fh->dirty)
-			fh->dirty = 1;
-		fh->dirty_block[block] = 1;
+		if (ret == block_size) {
+			uint8_t hash[hash_size];
+
+			gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
+			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+
+			fh->dirty_block[block] = 0;
+		} else {
+			if (!fh->dirty)
+				fh->dirty = 1;
+			fh->dirty_block[block] = 1;
+		}
 
 		buf += ret;
 		offset += ret;
