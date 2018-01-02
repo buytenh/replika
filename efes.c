@@ -76,6 +76,7 @@ static int trim_key_size;
 
 static int backing_dir_fd;
 static pthread_mutex_t readdir_lock;
+static pthread_key_t gcrypt_cipher_handle;
 static pthread_mutex_t gcrypt_lock;
 static int trim_fill;
 static uint8_t trim_key[64];
@@ -192,6 +193,44 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
+static gcry_cipher_hd_t get_cipher_handle(void)
+{
+	gcry_cipher_hd_t hd;
+
+	hd = pthread_getspecific(gcrypt_cipher_handle);
+	if (hd != NULL)
+		return hd;
+
+	/*
+	 * libgcrypt 1.6.3 segfaults if gcry_cipher_open() calls
+	 * are not strictly serialised.
+	 */
+	pthread_mutex_lock(&gcrypt_lock);
+
+	if (gcry_cipher_open(&hd, trim_cipher_algo, GCRY_CIPHER_MODE_ECB, 0)) {
+		fprintf(stderr, "get_cipher_handle: error opening cipher\n");
+		abort();
+	}
+
+	if (gcry_cipher_setkey(hd, trim_key, trim_key_size)) {
+		fprintf(stderr, "get_cipher_handle: error setting key\n");
+		abort();
+	}
+
+	pthread_mutex_unlock(&gcrypt_lock);
+
+	pthread_setspecific(gcrypt_cipher_handle, hd);
+
+	return hd;
+}
+
+static void close_cipher_handle(void *_hd)
+{
+	gcry_cipher_hd_t hd = _hd;
+
+	gcry_cipher_close(hd);
+}
+
 static int
 __flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
 {
@@ -205,26 +244,7 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
 	if (fh->block[block].state != BLOCK_STATE_DIRTY_TRIMMED)
 		abort();
 
-	/*
-	 * libgcrypt 1.6.3 segfaults if gcry_cipher_open() calls
-	 * are not strictly serialised.
-	 */
-	pthread_mutex_lock(&gcrypt_lock);
-
-	if (gcry_cipher_open(&hd, trim_cipher_algo, GCRY_CIPHER_MODE_ECB, 0)) {
-		fprintf(stderr, "write_trim_block: error opening cipher\n");
-		pthread_mutex_unlock(&gcrypt_lock);
-		return -EIO;
-	}
-
-	if (gcry_cipher_setkey(hd, trim_key, trim_key_size)) {
-		fprintf(stderr, "write_trim_block: error setting key\n");
-		gcry_cipher_close(hd);
-		pthread_mutex_unlock(&gcrypt_lock);
-		return -EIO;
-	}
-
-	pthread_mutex_unlock(&gcrypt_lock);
+	hd = get_cipher_handle();
 
 	ptr = (uint32_t *)buf;
 	ctr = offset / 8;
@@ -237,11 +257,8 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
 
 	if (gcry_cipher_encrypt(hd, buf, block_size, buf, block_size)) {
 		fprintf(stderr, "write_trim_block: error encrypting block\n");
-		gcry_cipher_close(hd);
 		return -EIO;
 	}
-
-	gcry_cipher_close(hd);
 
 	xpwrite(fh->imgfd, buf, block_size, offset);
 
@@ -665,26 +682,7 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 	if (!trim_fill)
 		return 0;
 
-	/*
-	 * libgcrypt 1.6.3 segfaults if gcry_cipher_open() calls
-	 * are not strictly serialised.
-	 */
-	pthread_mutex_lock(&gcrypt_lock);
-
-	if (gcry_cipher_open(&hd, trim_cipher_algo, GCRY_CIPHER_MODE_ECB, 0)) {
-		fprintf(stderr, "efes_fallocate: error opening cipher\n");
-		pthread_mutex_unlock(&gcrypt_lock);
-		return -EIO;
-	}
-
-	if (gcry_cipher_setkey(hd, trim_key, trim_key_size)) {
-		fprintf(stderr, "efes_fallocate: error setting key\n");
-		gcry_cipher_close(hd);
-		pthread_mutex_unlock(&gcrypt_lock);
-		return -EIO;
-	}
-
-	pthread_mutex_unlock(&gcrypt_lock);
+	hd = get_cipher_handle();
 
 	while (len) {
 		size_t totrim;
@@ -722,7 +720,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 			if (gcry_cipher_encrypt(hd, buf, totrim, buf, totrim)) {
 				fprintf(stderr, "efes_fallocate: error "
 						"encrypting block\n");
-				gcry_cipher_close(hd);
 				return -EIO;
 			}
 
@@ -731,7 +728,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 			ret = __make_dirty_for_writing(fh, block);
 			if (ret) {
 				pthread_rwlock_unlock(&b->lock);
-				gcry_cipher_close(hd);
 				return ret;
 			}
 
@@ -739,7 +735,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 			if (ret < 0) {
 				ret = -errno;
 				pthread_rwlock_unlock(&b->lock);
-				gcry_cipher_close(hd);
 				return ret;
 			}
 
@@ -755,8 +750,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 		offset += ret;
 		len -= ret;
 	}
-
-	gcry_cipher_close(hd);
 
 	return 0;
 }
@@ -915,6 +908,12 @@ int main(int argc, char *argv[])
 	}
 
 	pthread_mutex_init(&readdir_lock, NULL);
+
+	ret = pthread_key_create(&gcrypt_cipher_handle, close_cipher_handle);
+	if (ret) {
+		fprintf(stderr, "pthread_key_create: %s\n", strerror(-ret));
+		return 1;
+	}
 
 	pthread_mutex_init(&gcrypt_lock, NULL);
 
