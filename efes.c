@@ -143,7 +143,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 		strcpy(mappath, path);
 		strcpy(mappath + len - 4, ".map");
 
-		mapfd = openat(backing_dir_fd, mappath + 1, O_WRONLY);
+		mapfd = openat(backing_dir_fd, mappath + 1, O_RDWR);
 		if (mapfd < 0) {
 			fprintf(stderr, "efes_open: mapfile %s openat %s\n",
 				mappath, strerror(errno));
@@ -230,7 +230,7 @@ static void close_cipher_handle(void *_hd)
 }
 
 static int
-__flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
+__flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 {
 	off_t offset = block * block_size;
 	gcry_cipher_hd_t hd;
@@ -238,6 +238,8 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
 	uint32_t *ptr;
 	uint64_t ctr;
 	int i;
+	uint8_t hash[hash_size];
+	uint8_t disk_hash[hash_size];
 
 	if (fh->block[block].state != BLOCK_STATE_DIRTY_TRIMMED)
 		abort();
@@ -258,17 +260,18 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
 		return -EIO;
 	}
 
-	xpwrite(fh->imgfd, buf, block_size, offset);
+	gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
 
-	if (update_hash) {
-		uint8_t hash[hash_size];
+	xpread(fh->mapfd, disk_hash, hash_size, block * hash_size);
+	if (memcmp(hash, disk_hash, hash_size)) {
+		xpwrite(fh->imgfd, buf, block_size, offset);
 
-		gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
-
-		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-		fh->block[block].state = BLOCK_STATE_CLEAN;
-	} else {
-		fh->block[block].state = BLOCK_STATE_DIRTY;
+		if (make_clean) {
+			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+			fh->block[block].state = BLOCK_STATE_CLEAN;
+		} else {
+			fh->block[block].state = BLOCK_STATE_DIRTY;
+		}
 	}
 
 	return 0;
