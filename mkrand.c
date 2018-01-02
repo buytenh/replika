@@ -264,7 +264,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "posix_fallocate(hashmap): %s\n",
 			strerror(ret));
 	}
-	run_threads(mkrand_thread);
+	run_threads(mkrand_thread, NULL);
 	fprintf(stderr, "done               \n");
 
 	fprintf(stderr, "flushing buffers... ");

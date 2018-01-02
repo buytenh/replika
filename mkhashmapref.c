@@ -245,7 +245,7 @@ int main(int argc, char *argv[])
 	ref_diff_index = 0;
 
 	fprintf(stderr, "creating hashmap... ");
-	run_threads(hash_thread);
+	run_threads(hash_thread, NULL);
 
 	fprintf(stderr, "done                        "
 			"                            \n");

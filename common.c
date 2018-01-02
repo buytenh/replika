@@ -154,7 +154,7 @@ static int num_threads(void)
 	return ncpus;
 }
 
-void run_threads(void *(*handler)(void *))
+void run_threads(void *(*handler)(void *), void *cookie)
 {
 	struct worker_thread wt[MAX_THREADS];
 	pthread_t tid[MAX_THREADS];
@@ -167,6 +167,7 @@ void run_threads(void *(*handler)(void *))
 		xsem_init(&wt[i].sem0, 0, 0);
 		xsem_init(&wt[i].sem1, 0, 0);
 		wt[i].next = &wt[(i + 1) % nthreads];
+		wt[i].cookie = cookie;
 	}
 
 	for (i = 0; i < nthreads; i++)

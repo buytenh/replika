@@ -452,7 +452,7 @@ int main(int argc, char *argv[])
 			again = 0;
 
 			fprintf(stderr, "scanning for differences... ");
-			run_threads(copy_thread_no_hashmap);
+			run_threads(copy_thread_no_hashmap, NULL);
 			if (!signal_quit_flag) {
 				fprintf(stderr, "done                      "
 						"                          \n");
@@ -474,7 +474,7 @@ int main(int argc, char *argv[])
 
 		if (srchashmap == NULL) {
 			fprintf(stderr, "scanning for differences... ");
-			run_threads(copy_thread_no_hashmap);
+			run_threads(copy_thread_no_hashmap, NULL);
 		} else {
 			off_t off;
 
@@ -490,7 +490,7 @@ int main(int argc, char *argv[])
 			}
 
 			fprintf(stderr, "copying differences... ");
-			run_threads(copy_thread_hashmap);
+			run_threads(copy_thread_hashmap, NULL);
 		}
 		if (!signal_quit_flag) {
 			fprintf(stderr, "done                      "

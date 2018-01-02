@@ -26,6 +26,7 @@ struct worker_thread {
 	sem_t sem0;
 	sem_t sem1;
 	struct worker_thread *next;
+	void *cookie;
 };
 
 ssize_t xpread(int fd, void *buf, size_t count, off_t offset);
@@ -33,7 +34,7 @@ ssize_t xpwrite(int fd, const void *buf, size_t count, off_t offset);
 void xsem_post(sem_t *sem);
 void xsem_wait(sem_t *sem);
 
-void run_threads(void *(*handler)(void *));
+void run_threads(void *(*handler)(void *), void *cookie);
 int stderr_is_tty(void);
 int should_report_progress(void);
 void progress_reported(void);

@@ -206,7 +206,7 @@ int main(int argc, char *argv[])
 	else
 		fprintf(stderr, "updating hashmap... ");
 
-	run_threads(hash_thread);
+	run_threads(hash_thread, NULL);
 
 	fprintf(stderr, "done               \n");
 
