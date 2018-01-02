@@ -34,6 +34,7 @@
 #include <gcrypt.h>
 #include <limits.h>
 #include <linux/falloc.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -246,11 +247,79 @@ static int efes_statfs(const char *path, struct statvfs *buf)
 	return 0;
 }
 
+struct commit_state
+{
+	struct efes_file_info	*fh;
+	uint64_t		block;
+	uint64_t		dirty_index;
+	uint64_t		num_dirty;
+};
+
+static void *commit_thread(void *_me)
+{
+	struct worker_thread *me = _me;
+	struct commit_state *cs = me->cookie;
+	struct efes_file_info *fh = cs->fh;
+
+	xsem_wait(&me->sem0);
+
+	while (1) {
+		off_t block;
+		uint8_t buf[block_size];
+		int ret;
+		uint8_t hash[hash_size];
+
+		for (block = cs->block; block < fh->numblocks; block++) {
+			if (fh->dirty_block[block])
+				break;
+		}
+
+		if (block == fh->numblocks) {
+			cs->block = fh->numblocks;
+			break;
+		}
+
+		cs->block = block + 1;
+		cs->dirty_index++;
+
+		if (should_report_progress()) {
+			fprintf(stderr, "committing %Ld/%Ld (%Ld/%Ld "
+					"dirty blocks)\n",
+				(long long)block,
+				(long long)fh->numblocks,
+				(long long)cs->dirty_index,
+				(long long)cs->num_dirty);
+		}
+
+		ret = xpread(fh->imgfd, buf, block_size, block * block_size);
+		if (ret < block_size && block != fh->numblocks - 1) {
+			fprintf(stderr, "commit_thread: short read on "
+					"block %Ld\n", (long long)block);
+			break;
+		}
+
+		xsem_post(&me->next->sem0);
+
+		if (defrag_dirty_blocks)
+			xpwrite(fh->imgfd, buf, ret, block * block_size);
+
+		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
+
+		xsem_wait(&me->sem0);
+
+		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+	}
+
+	xsem_post(&me->next->sem0);
+
+	return NULL;
+}
+
 static void update_mapfile(struct efes_file_info *fh, const char *path)
 {
 	uint64_t num_dirty;
 	uint64_t i;
-	uint64_t dirty_index;
+	struct commit_state cs;
 
 	num_dirty = 0;
 	for (i = 0; i < fh->numblocks; i++) {
@@ -258,50 +327,21 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 			num_dirty++;
 	}
 
-	if (!num_dirty)
-		return;
-
-	if (stderr_is_tty()) {
-		fprintf(stderr, "committing %s (%Ld dirty blocks)\n",
-			path + 1, (long long)num_dirty);
-	}
-
-	dirty_index = 0;
-	for (i = 0; i < fh->numblocks; i++) {
-		uint8_t buf[block_size];
-		int ret;
-		uint8_t hash[hash_size];
-
-		if (!fh->dirty_block[i])
-			continue;
-
-		dirty_index++;
-		if (should_report_progress()) {
-			fprintf(stderr, "committing %Ld/%Ld (%Ld/%Ld "
-					"dirty blocks)\n",
-				(long long)i,
-				(long long)fh->numblocks,
-				(long long)dirty_index,
-				(long long)num_dirty);
+	if (num_dirty) {
+		if (stderr_is_tty()) {
+			fprintf(stderr, "committing %s (%Ld dirty blocks)\n",
+				path + 1, (long long)num_dirty);
 		}
 
-		ret = xpread(fh->imgfd, buf, block_size, i * block_size);
-		if (ret < block_size && i != fh->numblocks - 1) {
-			fprintf(stderr, "update_mapfile: short read on "
-					"block %Ld\n", (long long)i);
-			break;
-		}
+		cs.fh = fh;
+		cs.block = 0;
+		cs.dirty_index = 0;
+		cs.num_dirty = num_dirty;
+		run_threads(commit_thread, &cs);
 
-		if (defrag_dirty_blocks)
-			xpwrite(fh->imgfd, buf, ret, i * block_size);
-
-		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
-
-		xpwrite(fh->mapfd, hash, hash_size, i * hash_size);
+		if (stderr_is_tty())
+			fprintf(stderr, "commit done\n\n");
 	}
-
-	if (stderr_is_tty())
-		fprintf(stderr, "commit done\n\n");
 }
 
 static int efes_release(const char *path, struct fuse_file_info *fi)
