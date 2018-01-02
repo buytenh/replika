@@ -34,6 +34,7 @@ void xsem_post(sem_t *sem);
 void xsem_wait(sem_t *sem);
 
 void run_threads(void *(*handler)(void *));
+int stderr_is_tty(void);
 int should_report_progress(void);
 void progress_reported(void);
 

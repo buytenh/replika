@@ -184,7 +184,24 @@ void run_threads(void *(*handler)(void *))
 	}
 }
 
-static int stderr_is_tty = -1;
+int stderr_is_tty(void)
+{
+	static int flag = -1;
+
+	if (flag == -1) {
+		if (isatty(2)) {
+			flag = 1;
+		} else if (errno == EINVAL || errno == ENOTTY) {
+			flag = 0;
+		} else {
+			perror("isatty");
+			exit(1);
+		}
+	}
+
+	return flag;
+}
+
 static struct timeval lasttime;
 
 int should_report_progress(void)
@@ -192,18 +209,7 @@ int should_report_progress(void)
 	struct timeval curtime;
 	long long diff;
 
-	if (stderr_is_tty == -1) {
-		if (isatty(2)) {
-			stderr_is_tty = 1;
-		} else if (errno == EINVAL || errno == ENOTTY) {
-			stderr_is_tty = 0;
-		} else {
-			perror("isatty");
-			exit(1);
-		}
-	}
-
-	if (!stderr_is_tty)
+	if (!stderr_is_tty())
 		return 0;
 
 	xgettimeofday(&curtime, NULL);
@@ -221,6 +227,6 @@ int should_report_progress(void)
 
 void progress_reported(void)
 {
-	if (stderr_is_tty)
+	if (stderr_is_tty())
 		xgettimeofday(&lasttime, NULL);
 }
