@@ -261,8 +261,10 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 	if (!num_dirty)
 		return;
 
-	fprintf(stderr, "committing %s (%Ld dirty blocks)\n",
-		path + 1, (long long)num_dirty);
+	if (stderr_is_tty()) {
+		fprintf(stderr, "committing %s (%Ld dirty blocks)\n",
+			path + 1, (long long)num_dirty);
+	}
 
 	dirty_index = 0;
 	for (i = 0; i < fh->numblocks; i++) {
@@ -298,7 +300,8 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 		xpwrite(fh->mapfd, hash, hash_size, i * hash_size);
 	}
 
-	fprintf(stderr, "commit done\n\n");
+	if (stderr_is_tty())
+		fprintf(stderr, "commit done\n\n");
 }
 
 static int efes_release(const char *path, struct fuse_file_info *fi)
