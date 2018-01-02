@@ -178,11 +178,21 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->numblocks = numblocks;
 	fh->mapfd = mapfd;
 	if (writable) {
+		uint8_t dirty_hash[hash_size];
 		uint64_t i;
 
+		memset(dirty_hash, 0, sizeof(dirty_hash));
+
 		for (i = 0; i < numblocks; i++) {
+			uint8_t hash[hash_size];
+
 			pthread_rwlock_init(&fh->block[i].lock, NULL);
-			fh->block[i].state = BLOCK_STATE_CLEAN;
+
+			xpread(mapfd, hash, hash_size, i * hash_size);
+			if (memcmp(hash, dirty_hash, hash_size) == 0)
+				fh->block[i].state = BLOCK_STATE_DIRTY;
+			else
+				fh->block[i].state = BLOCK_STATE_CLEAN;
 		}
 	}
 
@@ -264,6 +274,14 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 
 	xpread(fh->mapfd, disk_hash, hash_size, block * hash_size);
 	if (memcmp(hash, disk_hash, hash_size)) {
+		uint8_t dirty_hash[hash_size];
+
+		memset(dirty_hash, 0, hash_size);
+		if (memcmp(disk_hash, dirty_hash, hash_size)) {
+			xpwrite(fh->mapfd, dirty_hash, hash_size,
+				block * hash_size);
+		}
+
 		xpwrite(fh->imgfd, buf, block_size, offset);
 
 		if (make_clean) {
@@ -359,10 +377,16 @@ static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 		pthread_rwlock_unlock(&b->lock);
 
 		pthread_rwlock_wrlock(&b->lock);
-		if (b->state == BLOCK_STATE_CLEAN)
+		if (b->state == BLOCK_STATE_CLEAN) {
+			uint8_t hash[hash_size];
+
+			memset(hash, 0, hash_size);
+			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+
 			b->state = BLOCK_STATE_DIRTY;
-		else if (b->state == BLOCK_STATE_DIRTY_TRIMMED)
+		} else if (b->state == BLOCK_STATE_DIRTY_TRIMMED) {
 			ret = __flush_trim_block(fh, block, 0);
+		}
 		pthread_rwlock_unlock(&b->lock);
 
 		pthread_rwlock_rdlock(&b->lock);
@@ -418,6 +442,12 @@ static int efes_write(const char *path, const char *buf, size_t size,
 			uint8_t hash[hash_size];
 
 			pthread_rwlock_wrlock(&b->lock);
+
+			if (b->state == BLOCK_STATE_CLEAN) {
+				memset(hash, 0, hash_size);
+				xpwrite(fh->mapfd, hash, hash_size,
+					block * hash_size);
+			}
 
 			xpwrite(fh->imgfd, buf, block_size, offset);
 
