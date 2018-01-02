@@ -42,6 +42,16 @@
 
 #define DIV_ROUND_UP(x, y)	(((x) + (y) - 1) / (y))
 
+enum {
+	BLOCK_STATE_CLEAN,
+	BLOCK_STATE_DIRTY,
+};
+
+struct block
+{
+	uint8_t		state;
+};
+
 struct efes_file_info
 {
 	int		imgfd;
@@ -50,7 +60,7 @@ struct efes_file_info
 	uint64_t	numblocks;
 	int		mapfd;
 	int		dirty;
-	uint8_t		dirty_block[0];
+	struct block	block[0];
 };
 
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
@@ -151,7 +161,8 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 	numblocks = DIV_ROUND_UP(buf.st_size, block_size);
 
-	fh = malloc(sizeof(*fh) + (writable ? numblocks : 0));
+	fh = malloc(sizeof(*fh) +
+		    (writable ? numblocks : 0) * sizeof(fh->block[0]));
 	if (fh == NULL) {
 		if (writable)
 			close(mapfd);
@@ -165,8 +176,12 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->numblocks = numblocks;
 	fh->mapfd = mapfd;
 	fh->dirty = 0;
-	if (writable)
-		memset(fh->dirty_block, 0, numblocks);
+	if (writable) {
+		uint64_t i;
+
+		for (i = 0; i < numblocks; i++)
+			fh->block[i].state = BLOCK_STATE_CLEAN;
+	}
 
 	fi->fh = (uint64_t)fh;
 
@@ -220,11 +235,11 @@ static int efes_write(const char *path, const char *buf, size_t size,
 			gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
-			fh->dirty_block[block] = 0;
+			fh->block[block].state = BLOCK_STATE_CLEAN;
 		} else {
 			if (!fh->dirty)
 				fh->dirty = 1;
-			fh->dirty_block[block] = 1;
+			fh->block[block].state = BLOCK_STATE_DIRTY;
 		}
 
 		buf += ret;
@@ -275,7 +290,7 @@ static void *commit_thread(void *_me)
 		uint8_t hash[hash_size];
 
 		for (block = cs->block; block < fh->numblocks; block++) {
-			if (fh->dirty_block[block])
+			if (fh->block[block].state != BLOCK_STATE_CLEAN)
 				break;
 		}
 
@@ -328,7 +343,7 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 	num_dirty = 0;
 	for (i = 0; i < fh->numblocks; i++) {
-		if (fh->dirty_block[i])
+		if (fh->block[i].state != BLOCK_STATE_CLEAN)
 			num_dirty++;
 	}
 
