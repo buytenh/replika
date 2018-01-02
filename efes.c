@@ -45,10 +45,12 @@
 enum {
 	BLOCK_STATE_CLEAN,
 	BLOCK_STATE_DIRTY,
+	BLOCK_STATE_DIRTY_TRIMMED,
 };
 
 struct block
 {
+	pthread_rwlock_t	lock;
 	uint8_t		state;
 };
 
@@ -179,8 +181,10 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	if (writable) {
 		uint64_t i;
 
-		for (i = 0; i < numblocks; i++)
+		for (i = 0; i < numblocks; i++) {
+			pthread_rwlock_init(&fh->block[i].lock, NULL);
 			fh->block[i].state = BLOCK_STATE_CLEAN;
+		}
 	}
 
 	fi->fh = (uint64_t)fh;
@@ -188,19 +192,177 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
+static int
+__flush_trim_block(struct efes_file_info *fh, off_t block, int update_hash)
+{
+	off_t offset = block * block_size;
+	gcry_cipher_hd_t hd;
+	uint8_t buf[block_size];
+	uint32_t *ptr;
+	uint64_t ctr;
+	int i;
+
+	if (fh->block[block].state != BLOCK_STATE_DIRTY_TRIMMED)
+		abort();
+
+	/*
+	 * libgcrypt 1.6.3 segfaults if gcry_cipher_open() calls
+	 * are not strictly serialised.
+	 */
+	pthread_mutex_lock(&gcrypt_lock);
+
+	if (gcry_cipher_open(&hd, trim_cipher_algo, GCRY_CIPHER_MODE_ECB, 0)) {
+		fprintf(stderr, "write_trim_block: error opening cipher\n");
+		pthread_mutex_unlock(&gcrypt_lock);
+		return -EIO;
+	}
+
+	if (gcry_cipher_setkey(hd, trim_key, trim_key_size)) {
+		fprintf(stderr, "write_trim_block: error setting key\n");
+		gcry_cipher_close(hd);
+		pthread_mutex_unlock(&gcrypt_lock);
+		return -EIO;
+	}
+
+	pthread_mutex_unlock(&gcrypt_lock);
+
+	ptr = (uint32_t *)buf;
+	ctr = offset / 8;
+
+	for (i = 0; i < block_size; i += 8) {
+		*ptr++ = htonl(ctr >> 32);
+		*ptr++ = htonl(ctr & 0xffffffff);
+		ctr++;
+	}
+
+	if (gcry_cipher_encrypt(hd, buf, block_size, buf, block_size)) {
+		fprintf(stderr, "write_trim_block: error encrypting block\n");
+		gcry_cipher_close(hd);
+		return -EIO;
+	}
+
+	gcry_cipher_close(hd);
+
+	xpwrite(fh->imgfd, buf, block_size, offset);
+
+	if (update_hash) {
+		uint8_t hash[hash_size];
+
+		gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
+
+		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+		fh->block[block].state = BLOCK_STATE_CLEAN;
+	} else {
+		fh->block[block].state = BLOCK_STATE_DIRTY;
+	}
+
+	return 0;
+}
+
+static int __flush_trim_for_reading(struct efes_file_info *fh, off_t block)
+{
+	struct block *b = &fh->block[block];
+	int ret;
+
+	ret = 0;
+	while (ret == 0 && b->state == BLOCK_STATE_DIRTY_TRIMMED) {
+		pthread_rwlock_unlock(&b->lock);
+
+		pthread_rwlock_wrlock(&b->lock);
+		if (b->state == BLOCK_STATE_DIRTY_TRIMMED)
+			ret = __flush_trim_block(fh, block, 1);
+		pthread_rwlock_unlock(&b->lock);
+
+		pthread_rwlock_rdlock(&b->lock);
+	}
+
+	return ret;
+}
+
 static int efes_read(const char *path, char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
+	off_t processed;
 
-	return pread(fh->imgfd, buf, size, offset);
+	if (!fh->writable)
+		return pread(fh->imgfd, buf, size, offset);
+
+	processed = 0;
+	while (processed < size) {
+		size_t toread;
+		off_t block;
+		struct block *b;
+		int ret;
+
+		if (offset >= fh->file_size)
+			break;
+
+		toread = size - processed;
+		if (offset + toread > fh->file_size)
+			toread = fh->file_size - offset;
+		if (toread > block_size - (offset % block_size))
+			toread = block_size - (offset % block_size);
+
+		block = offset / block_size;
+		b = &fh->block[block];
+
+		pthread_rwlock_rdlock(&b->lock);
+
+		ret = __flush_trim_for_reading(fh, block);
+		if (ret) {
+			pthread_rwlock_unlock(&b->lock);
+			return ret;
+		}
+
+		ret = pread(fh->imgfd, buf, toread, offset);
+
+		pthread_rwlock_unlock(&b->lock);
+
+		if (ret < 0)
+			return processed ? processed : -errno;
+
+		buf += ret;
+		offset += ret;
+
+		processed += ret;
+	}
+
+	return processed;
+}
+
+static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
+{
+	struct block *b = &fh->block[block];
+	int ret;
+
+	ret = 0;
+	while (ret == 0 && b->state != BLOCK_STATE_DIRTY) {
+		pthread_rwlock_unlock(&b->lock);
+
+		pthread_rwlock_wrlock(&b->lock);
+
+		if (!fh->dirty)
+			fh->dirty = 1;
+
+		if (b->state == BLOCK_STATE_CLEAN)
+			b->state = BLOCK_STATE_DIRTY;
+		else if (b->state == BLOCK_STATE_DIRTY_TRIMMED)
+			ret = __flush_trim_block(fh, block, 0);
+
+		pthread_rwlock_unlock(&b->lock);
+
+		pthread_rwlock_rdlock(&b->lock);
+	}
+
+	return ret;
 }
 
 static int efes_write(const char *path, const char *buf, size_t size,
 		      off_t offset, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
-	off_t written;
+	off_t processed;
 
 	if (!fh->writable)
 		return -EBADF;
@@ -208,47 +370,64 @@ static int efes_write(const char *path, const char *buf, size_t size,
 	if (size > INT_MAX)
 		size = INT_MAX;
 
-	written = 0;
-	while (written < size) {
+	processed = 0;
+	while (processed < size) {
 		size_t towrite;
 		off_t block;
+		struct block *b;
 		int ret;
 
 		if (offset >= fh->file_size)
 			break;
 
-		towrite = size - written;
+		towrite = size - processed;
 		if (offset + towrite > fh->file_size)
 			towrite = fh->file_size - offset;
 		if (towrite > block_size - (offset % block_size))
 			towrite = block_size - (offset % block_size);
 
 		block = offset / block_size;
+		b = &fh->block[block];
 
-		ret = pwrite(fh->imgfd, buf, towrite, offset);
-		if (ret < 0)
-			return written ? written : -errno;
+		if (towrite < block_size) {
+			pthread_rwlock_rdlock(&b->lock);
 
-		if (ret == block_size) {
+			ret = __make_dirty_for_writing(fh, block);
+			if (ret) {
+				pthread_rwlock_unlock(&b->lock);
+				return ret;
+			}
+
+			ret = pwrite(fh->imgfd, buf, towrite, offset);
+
+			pthread_rwlock_unlock(&b->lock);
+		} else {
 			uint8_t hash[hash_size];
+
+			pthread_rwlock_wrlock(&b->lock);
+
+			xpwrite(fh->imgfd, buf, block_size, offset);
 
 			gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
-			fh->block[block].state = BLOCK_STATE_CLEAN;
-		} else {
-			if (!fh->dirty)
-				fh->dirty = 1;
-			fh->block[block].state = BLOCK_STATE_DIRTY;
+			b->state = BLOCK_STATE_CLEAN;
+
+			pthread_rwlock_unlock(&b->lock);
+
+			ret = block_size;
 		}
+
+		if (ret < 0)
+			return processed ? processed : -errno;
 
 		buf += ret;
 		offset += ret;
 
-		written += ret;
+		processed += ret;
 	}
 
-	return written;
+	return processed;
 }
 
 static int efes_statfs(const char *path, struct statvfs *buf)
@@ -281,21 +460,24 @@ static void *commit_thread(void *_me)
 	struct commit_state *cs = me->cookie;
 	struct efes_file_info *fh = cs->fh;
 
-	xsem_wait(&me->sem0);
-
 	while (1) {
 		off_t block;
+		struct block *b;
 		uint8_t buf[block_size];
 		int ret;
 		uint8_t hash[hash_size];
 
+		xsem_wait(&me->sem0);
+
 		for (block = cs->block; block < fh->numblocks; block++) {
-			if (fh->block[block].state != BLOCK_STATE_CLEAN)
+			b = &fh->block[block];
+			if (b->state != BLOCK_STATE_CLEAN)
 				break;
 		}
 
 		if (block == fh->numblocks) {
 			cs->block = fh->numblocks;
+			xsem_post(&me->next->sem0);
 			break;
 		}
 
@@ -311,26 +493,28 @@ static void *commit_thread(void *_me)
 				(long long)cs->num_dirty);
 		}
 
-		ret = xpread(fh->imgfd, buf, block_size, block * block_size);
-		if (ret < block_size && block != fh->numblocks - 1) {
-			fprintf(stderr, "commit_thread: short read on "
-					"block %Ld\n", (long long)block);
-			break;
-		}
-
 		xsem_post(&me->next->sem0);
 
-		if (defrag_dirty_blocks)
-			xpwrite(fh->imgfd, buf, ret, block * block_size);
+		if (b->state == BLOCK_STATE_DIRTY) {
+			off_t off = block * block_size;
 
-		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
+			ret = xpread(fh->imgfd, buf, block_size, off);
+			if (ret < block_size && block != fh->numblocks - 1) {
+				fprintf(stderr, "commit_thread: short "
+						"read on block %Ld\n",
+					(long long)block);
+				break;
+			}
 
-		xsem_wait(&me->sem0);
+			if (defrag_dirty_blocks)
+				xpwrite(fh->imgfd, buf, ret, off);
 
-		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+			gcry_md_hash_buffer(hash_algo, hash, buf, ret);
+			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
+		} else if (b->state == BLOCK_STATE_DIRTY_TRIMMED) {
+			ret = __flush_trim_block(fh, block, 1);
+		}
 	}
-
-	xsem_post(&me->next->sem0);
 
 	return NULL;
 }
@@ -369,9 +553,14 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 	struct efes_file_info *fh = (void *)fi->fh;
 
 	if (fh->writable) {
+		uint64_t i;
+
 		if (fh->dirty)
 			update_mapfile(fh, path);
+
 		close(fh->mapfd);
+		for (i = 0; i < fh->numblocks; i++)
+			pthread_rwlock_destroy(&fh->block[i].lock);
 	}
 	close(fh->imgfd);
 	free(fh);
@@ -457,31 +646,6 @@ out:
 }
 
 #if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 9)
-static ssize_t xwrite(const char *path, const void *buf, size_t size,
-		      off_t offset, struct fuse_file_info *fi)
-{
-	size_t written;
-
-	written = 0;
-	while (written < size) {
-		int ret;
-
-		ret = efes_write(path, buf, size - written, offset, fi);
-		if (ret < 0)
-			return written ? written : -errno;
-
-		if (ret == 0)
-			break;
-
-		buf += ret;
-		offset += ret;
-
-		written += ret;
-	}
-
-	return written;
-}
-
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
@@ -523,11 +687,10 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 	pthread_mutex_unlock(&gcrypt_lock);
 
 	while (len) {
-		uint8_t buf[block_size];
 		size_t totrim;
-		uint32_t *ptr;
-		uint64_t ctr;
-		int i;
+		off_t block;
+		struct block *b;
+		int ret;
 
 		if (offset >= fh->file_size)
 			break;
@@ -535,32 +698,62 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 		totrim = len;
 		if (offset + totrim > fh->file_size)
 			totrim = fh->file_size - offset;
-		if (totrim > sizeof(buf) - (offset % sizeof(buf)))
-			totrim = sizeof(buf) - (offset % sizeof(buf));
+		if (totrim > block_size - (offset % block_size))
+			totrim = block_size - (offset % block_size);
 
-		ptr = (uint32_t *)buf;
-		ctr = offset / 8;
+		block = offset / block_size;
+		b = &fh->block[block];
 
-		for (i = 0; i < totrim; i += 8) {
-			*ptr++ = htonl(ctr >> 32);
-			*ptr++ = htonl(ctr & 0xffffffff);
-			ctr++;
+		if (totrim < block_size) {
+			uint8_t buf[block_size];
+			uint32_t *ptr;
+			uint64_t ctr;
+			int i;
+
+			ptr = (uint32_t *)buf;
+			ctr = offset / 8;
+
+			for (i = 0; i < totrim; i += 8) {
+				*ptr++ = htonl(ctr >> 32);
+				*ptr++ = htonl(ctr & 0xffffffff);
+				ctr++;
+			}
+
+			if (gcry_cipher_encrypt(hd, buf, totrim, buf, totrim)) {
+				fprintf(stderr, "efes_fallocate: error "
+						"encrypting block\n");
+				gcry_cipher_close(hd);
+				return -EIO;
+			}
+
+			pthread_rwlock_rdlock(&b->lock);
+
+			ret = __make_dirty_for_writing(fh, block);
+			if (ret) {
+				pthread_rwlock_unlock(&b->lock);
+				gcry_cipher_close(hd);
+				return ret;
+			}
+
+			ret = pwrite(fh->imgfd, buf, totrim, offset);
+			if (ret < 0) {
+				ret = -errno;
+				pthread_rwlock_unlock(&b->lock);
+				gcry_cipher_close(hd);
+				return ret;
+			}
+
+			pthread_rwlock_unlock(&b->lock);
+		} else {
+			pthread_rwlock_wrlock(&b->lock);
+			b->state = BLOCK_STATE_DIRTY_TRIMMED;
+			pthread_rwlock_unlock(&b->lock);
+
+			ret = block_size;
 		}
 
-		if (gcry_cipher_encrypt(hd, buf, totrim, buf, totrim)) {
-			fprintf(stderr, "efes_fallocate: error "
-					"encrypting block\n");
-			gcry_cipher_close(hd);
-			return -EIO;
-		}
-
-		if (xwrite(path, buf, totrim, offset, fi) != totrim) {
-			gcry_cipher_close(hd);
-			return -EIO;
-		}
-
-		offset += totrim;
-		len -= totrim;
+		offset += ret;
+		len -= ret;
 	}
 
 	gcry_cipher_close(hd);
