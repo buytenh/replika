@@ -61,7 +61,6 @@ struct efes_file_info
 	uint64_t	file_size;
 	uint64_t	numblocks;
 	int		mapfd;
-	int		dirty;
 	struct block	block[0];
 };
 
@@ -178,7 +177,6 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->file_size = buf.st_size;
 	fh->numblocks = numblocks;
 	fh->mapfd = mapfd;
-	fh->dirty = 0;
 	if (writable) {
 		uint64_t i;
 
@@ -358,15 +356,10 @@ static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 		pthread_rwlock_unlock(&b->lock);
 
 		pthread_rwlock_wrlock(&b->lock);
-
-		if (!fh->dirty)
-			fh->dirty = 1;
-
 		if (b->state == BLOCK_STATE_CLEAN)
 			b->state = BLOCK_STATE_DIRTY;
 		else if (b->state == BLOCK_STATE_DIRTY_TRIMMED)
 			ret = __flush_trim_block(fh, block, 0);
-
 		pthread_rwlock_unlock(&b->lock);
 
 		pthread_rwlock_rdlock(&b->lock);
@@ -572,10 +565,9 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 	if (fh->writable) {
 		uint64_t i;
 
-		if (fh->dirty)
-			update_mapfile(fh, path);
-
+		update_mapfile(fh, path);
 		close(fh->mapfd);
+
 		for (i = 0; i < fh->numblocks; i++)
 			pthread_rwlock_destroy(&fh->block[i].lock);
 	}
