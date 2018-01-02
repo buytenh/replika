@@ -465,10 +465,16 @@ static ssize_t xwrite(const char *path, const void *buf, size_t size,
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
-	uint64_t zero = 0;
 	gcry_cipher_hd_t hd;
 
 	if (!(mode & FALLOC_FL_PUNCH_HOLE))
+		return -EINVAL;
+
+	if (offset & 511)
+		return -EINVAL;
+	if (len & 511)
+		return -EINVAL;
+	if (len < 512)
 		return -EINVAL;
 
 	if (!trim_fill)
@@ -495,30 +501,14 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 
 	pthread_mutex_unlock(&gcrypt_lock);
 
-	if (offset & 7) {
-		int towrite;
-
-		towrite = 8 - (offset & 7);
-		if (towrite > len)
-			towrite = len;
-
-		if (xwrite(path, &zero, towrite, offset, fi) != towrite) {
-			gcry_cipher_close(hd);
-			return -EIO;
-		}
-
-		offset += towrite;
-		len -= towrite;
-	}
-
-	while (len >= 8) {
+	while (len) {
 		uint8_t buf[block_size];
 		size_t towrite;
 		uint64_t ctr;
 		uint32_t *ptr;
 		int i;
 
-		towrite = len & ~7ULL;
+		towrite = len;
 		if (towrite > sizeof(buf) - (offset % sizeof(buf)))
 			towrite = sizeof(buf) - (offset % sizeof(buf));
 
@@ -545,11 +535,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 
 		offset += towrite;
 		len -= towrite;
-	}
-
-	if (len && xwrite(path, &zero, len, offset, fi) != len) {
-		gcry_cipher_close(hd);
-		return -EIO;
 	}
 
 	gcry_cipher_close(hd);
