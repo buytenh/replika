@@ -46,8 +46,9 @@ struct efes_file_info
 {
 	int		imgfd;
 	int		writable;
-	int		mapfd;
+	uint64_t	file_size;
 	uint64_t	numblocks;
+	int		mapfd;
 	int		dirty;
 	uint8_t		dirty_block[0];
 };
@@ -160,8 +161,9 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 	fh->imgfd = imgfd;
 	fh->writable = writable;
-	fh->mapfd = mapfd;
+	fh->file_size = buf.st_size;
 	fh->numblocks = numblocks;
+	fh->mapfd = mapfd;
 	fh->dirty = 0;
 	if (writable)
 		memset(fh->dirty_block, 0, numblocks);
@@ -193,17 +195,20 @@ static int efes_write(const char *path, const char *buf, size_t size,
 
 	written = 0;
 	while (written < size) {
-		off_t block;
 		size_t towrite;
+		off_t block;
 		int ret;
 
-		block = offset / block_size;
-		if (block >= fh->numblocks)
+		if (offset >= fh->file_size)
 			break;
 
 		towrite = size - written;
+		if (offset + towrite > fh->file_size)
+			towrite = fh->file_size - offset;
 		if (towrite > block_size - (offset % block_size))
 			towrite = block_size - (offset % block_size);
+
+		block = offset / block_size;
 
 		ret = pwrite(fh->imgfd, buf, towrite, offset);
 		if (ret < 0)
@@ -465,6 +470,7 @@ static ssize_t xwrite(const char *path, const void *buf, size_t size,
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
+	struct efes_file_info *fh = (void *)fi->fh;
 	gcry_cipher_hd_t hd;
 
 	if (!(mode & FALLOC_FL_PUNCH_HOLE))
@@ -503,38 +509,43 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 
 	while (len) {
 		uint8_t buf[block_size];
-		size_t towrite;
-		uint64_t ctr;
+		size_t totrim;
 		uint32_t *ptr;
+		uint64_t ctr;
 		int i;
 
-		towrite = len;
-		if (towrite > sizeof(buf) - (offset % sizeof(buf)))
-			towrite = sizeof(buf) - (offset % sizeof(buf));
+		if (offset >= fh->file_size)
+			break;
 
-		ctr = offset / 8;
+		totrim = len;
+		if (offset + totrim > fh->file_size)
+			totrim = fh->file_size - offset;
+		if (totrim > sizeof(buf) - (offset % sizeof(buf)))
+			totrim = sizeof(buf) - (offset % sizeof(buf));
+
 		ptr = (uint32_t *)buf;
+		ctr = offset / 8;
 
-		for (i = 0; i < towrite; i += 8) {
+		for (i = 0; i < totrim; i += 8) {
 			*ptr++ = htonl(ctr >> 32);
 			*ptr++ = htonl(ctr & 0xffffffff);
 			ctr++;
 		}
 
-		if (gcry_cipher_encrypt(hd, buf, towrite, buf, towrite)) {
+		if (gcry_cipher_encrypt(hd, buf, totrim, buf, totrim)) {
 			fprintf(stderr, "efes_fallocate: error "
 					"encrypting block\n");
 			gcry_cipher_close(hd);
 			return -EIO;
 		}
 
-		if (xwrite(path, buf, towrite, offset, fi) != towrite) {
+		if (xwrite(path, buf, totrim, offset, fi) != totrim) {
 			gcry_cipher_close(hd);
 			return -EIO;
 		}
 
-		offset += towrite;
-		len -= towrite;
+		offset += totrim;
+		len -= totrim;
 	}
 
 	gcry_cipher_close(hd);
