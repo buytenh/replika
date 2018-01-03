@@ -174,6 +174,7 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	off_t mapsize;
 	char mapbuf[1048576];
 	struct file *f;
+	uint8_t dirty_hash[hash_size];
 	off_t i;
 
 	readonly = 0;
@@ -236,6 +237,8 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	f->fd = imgfd;
 	f->blocks = sizeblocks;
 
+	memset(dirty_hash, 0, sizeof(dirty_hash));
+
 	for (i = 0; i < sizeblocks; i++) {
 		uint8_t hash[hash_size];
 		struct block_hash *bh;
@@ -245,6 +248,9 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 			fprintf(stderr, "error reading from map file\n");
 			exit(1);
 		}
+
+		if (memcmp(hash, dirty_hash, hash_size) == 0)
+			continue;
 
 		bh = get_block_hash(hash);
 
