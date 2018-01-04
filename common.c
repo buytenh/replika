@@ -64,16 +64,17 @@ static void xpthread_join(pthread_t thread, void **retval)
 
 ssize_t xpread(int fd, void *buf, size_t count, off_t offset)
 {
-	off_t off;
+	off_t processed;
 
-	off = 0;
-	while (off < count) {
+	processed = 0;
+	while (processed < count) {
 		ssize_t ret;
 
-		ret = pread(fd, buf + off, count - off, offset + off);
+		do {
+			ret = pread(fd, buf, count - processed, offset);
+		} while (ret < 0 && errno == EINTR);
+
 		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
 			perror("pread");
 			exit(1);
 		}
@@ -81,32 +82,39 @@ ssize_t xpread(int fd, void *buf, size_t count, off_t offset)
 		if (ret == 0)
 			break;
 
-		off += ret;
+		buf += ret;
+		offset += ret;
+
+		processed += ret;
 	}
 
-	return off;
+	return processed;
 }
 
 ssize_t xpwrite(int fd, const void *buf, size_t count, off_t offset)
 {
-	off_t off;
+	off_t processed;
 
-	off = 0;
-	while (off < count) {
+	processed = 0;
+	while (processed < count) {
 		ssize_t ret;
 
-		ret = pwrite(fd, buf + off, count - off, offset + off);
+		do {
+			ret = pwrite(fd, buf, count - processed, offset);
+		} while (ret < 0 && errno == EINTR);
+
 		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
 			perror("pwrite");
 			exit(1);
 		}
 
-		off += ret;
+		buf += ret;
+		offset += ret;
+
+		processed += ret;
 	}
 
-	return off;
+	return processed;
 }
 
 static void xsem_init(sem_t *sem, int pshared, unsigned int value)
