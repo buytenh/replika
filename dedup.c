@@ -283,6 +283,7 @@ static void dedup_block_hash(struct block_hash *bh)
 	while (an != NULL) {
 		struct hashref *dst;
 		off_t dstoff;
+		off_t off;
 
 		dst = iv_container_of(an, struct hashref, an);
 		an = iv_avl_tree_next(an);
@@ -303,43 +304,49 @@ static void dedup_block_hash(struct block_hash *bh)
 			       (long long)dstoff);
 		}
 
-		if (!dry_run) {
+		if (dry_run)
+			continue;
+
+		off = 0;
+		while (off < block_size) {
 			struct {
 				struct file_dedupe_range r;
 				struct file_dedupe_range_info ri;
 			} x;
 
-			x.r.src_offset = srcoff;
-			x.r.src_length = block_size;
+			x.r.src_offset = srcoff + off;
+			x.r.src_length = block_size - off;
 			x.r.dest_count = 1;
 			x.r.reserved1 = 0;
 			x.r.reserved2 = 0;
 			x.ri.dest_fd = dst->f->fd;
-			x.ri.dest_offset = dstoff;
+			x.ri.dest_offset = dstoff + off;
 			x.ri.bytes_deduped = 0;
 			x.ri.status = 0;
 			x.ri.reserved = 0;
 
 			if (ioctl(src->f->fd, FIDEDUPERANGE, &x) < 0) {
 				perror("ioctl");
-				exit(1);
+				break;
 			}
 
 			if (x.ri.status == FILE_DEDUPE_RANGE_DIFFERS) {
 				fprintf(stderr, "welp, data differs\n");
-				continue;
+				break;
 			}
 
 			if (x.ri.status != FILE_DEDUPE_RANGE_SAME) {
 				fprintf(stderr, "FIDEDUPERANGE: %s\n",
 					strerror(-x.ri.status));
-				exit(1);
+				break;
 			}
 
-			if (x.ri.bytes_deduped != block_size) {
-				fprintf(stderr, "welp, didn't dedupe a "
-						"whole block\n");
+			if (x.ri.bytes_deduped == 0) {
+				fprintf(stderr, "welp, deduped zero bytes?\n");
+				break;
 			}
+
+			off += x.ri.bytes_deduped;
 		}
 	}
 
