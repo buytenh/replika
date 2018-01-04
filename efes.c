@@ -179,9 +179,26 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->mapfd = mapfd;
 	if (writable) {
 		uint8_t dirty_hash[hash_size];
+		int mapfd2;
+		FILE *fp;
+		char mapbuf[1048576];
 		uint64_t i;
 
 		memset(dirty_hash, 0, sizeof(dirty_hash));
+
+		mapfd2 = dup(mapfd);
+		if (mapfd2 < 0) {
+			perror("dup");
+			exit(1);
+		}
+
+		fp = fdopen(mapfd2, "r");
+		if (fp == NULL) {
+			perror("fdopen");
+			exit(1);
+		}
+
+		setbuffer(fp, mapbuf, sizeof(mapbuf));
 
 		for (i = 0; i < numblocks; i++) {
 			uint8_t hash[hash_size];
@@ -189,14 +206,17 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 			pthread_rwlock_init(&fh->block[i].lock, NULL);
 
-			ret = xpread(mapfd, hash, hash_size, i * hash_size);
-			if (ret < hash_size ||
-			    memcmp(hash, dirty_hash, hash_size) == 0) {
+			ret = fread(hash, hash_size, 1, fp);
+			if (ret < 1)
+				fseek(fp, (i + 1) * block_size, SEEK_SET);
+
+			if (ret < 1 || !memcmp(hash, dirty_hash, hash_size))
 				fh->block[i].state = BLOCK_STATE_DIRTY;
-			} else {
+			else
 				fh->block[i].state = BLOCK_STATE_CLEAN;
-			}
 		}
+
+		fclose(fp);
 	}
 
 	fi->fh = (uint64_t)fh;
