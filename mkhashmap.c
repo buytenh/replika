@@ -63,11 +63,12 @@ static void *hash_thread(void *_me)
 		xsem_post(&me->next->sem0);
 
 		if (ret < block_size && off != sizeblocks - 1) {
-			fprintf(stderr, "short read\n");
-			return NULL;
+			fprintf(stderr, "short read on block %Ld\n",
+				(long long)off);
+			memset(hash, 0, hash_size);
+		} else {
+			gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 		}
-
-		gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 
 		xsem_wait(&me->sem0);
 

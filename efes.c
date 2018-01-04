@@ -551,13 +551,13 @@ static void *commit_thread(void *_me)
 				fprintf(stderr, "commit_thread: short "
 						"read on block %Ld\n",
 					(long long)block);
-				break;
+				memset(hash, 0, hash_size);
+			} else {
+				if (defrag_dirty_blocks)
+					xpwrite(fh->imgfd, buf, ret, off);
+				gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 			}
 
-			if (defrag_dirty_blocks)
-				xpwrite(fh->imgfd, buf, ret, off);
-
-			gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 		} else if (b->state == BLOCK_STATE_DIRTY_TRIMMED) {
 			ret = __flush_trim_block(fh, block, 1);
