@@ -185,14 +185,17 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 		for (i = 0; i < numblocks; i++) {
 			uint8_t hash[hash_size];
+			int ret;
 
 			pthread_rwlock_init(&fh->block[i].lock, NULL);
 
-			xpread(mapfd, hash, hash_size, i * hash_size);
-			if (memcmp(hash, dirty_hash, hash_size) == 0)
+			ret = xpread(mapfd, hash, hash_size, i * hash_size);
+			if (ret < hash_size ||
+			    memcmp(hash, dirty_hash, hash_size) == 0) {
 				fh->block[i].state = BLOCK_STATE_DIRTY;
-			else
+			} else {
 				fh->block[i].state = BLOCK_STATE_CLEAN;
+			}
 		}
 	}
 
