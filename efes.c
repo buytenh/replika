@@ -253,6 +253,7 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 	int i;
 	uint8_t hash[hash_size];
 	uint8_t disk_hash[hash_size];
+	int ret;
 
 	if (fh->block[block].state != BLOCK_STATE_DIRTY_TRIMMED)
 		abort();
@@ -275,12 +276,13 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 
 	gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
 
-	xpread(fh->mapfd, disk_hash, hash_size, block * hash_size);
-	if (memcmp(hash, disk_hash, hash_size)) {
+	ret = xpread(fh->mapfd, disk_hash, hash_size, block * hash_size);
+	if (ret < hash_size || memcmp(hash, disk_hash, hash_size)) {
 		uint8_t dirty_hash[hash_size];
 
 		memset(dirty_hash, 0, hash_size);
-		if (memcmp(disk_hash, dirty_hash, hash_size)) {
+		if (ret < hash_size ||
+		    memcmp(disk_hash, dirty_hash, hash_size)) {
 			xpwrite(fh->mapfd, dirty_hash, hash_size,
 				block * hash_size);
 		}
