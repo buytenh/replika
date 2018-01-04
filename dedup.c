@@ -267,7 +267,7 @@ static void dedup_block_hash(struct block_hash *bh)
 {
 	struct iv_avl_node *an;
 	struct hashref *src;
-	off_t srcoff;
+	off_t srcblock;
 	int src_printed;
 
 	an = iv_avl_tree_min(&bh->refs);
@@ -275,14 +275,14 @@ static void dedup_block_hash(struct block_hash *bh)
 		return;
 
 	src = iv_container_of(an, struct hashref, an);
-	srcoff = (off_t)(src - src->f->refs) * block_size;
+	srcblock = src - src->f->refs;
 
 	an = iv_avl_tree_next(an);
 
 	src_printed = 0;
 	while (an != NULL) {
 		struct hashref *dst;
-		off_t dstoff;
+		off_t dstblock;
 		off_t off;
 
 		dst = iv_container_of(an, struct hashref, an);
@@ -291,17 +291,17 @@ static void dedup_block_hash(struct block_hash *bh)
 		if (dst->f->readonly)
 			continue;
 
-		dstoff = (off_t)(dst - dst->f->refs) * block_size;
+		dstblock = dst - dst->f->refs;
 
 		if (dry_run || verbose) {
 			if (!src_printed) {
-				printf("src: %s off %Ld\n", src->f->name,
-				       (long long)srcoff);
+				printf("src: %s block %Ld\n", src->f->name,
+				       (long long)srcblock);
 				src_printed = 1;
 			}
 
-			printf("dst: %s off %Ld\n", dst->f->name,
-			       (long long)dstoff);
+			printf("dst: %s block %Ld\n", dst->f->name,
+			       (long long)dstblock);
 		}
 
 		if (dry_run)
@@ -314,13 +314,13 @@ static void dedup_block_hash(struct block_hash *bh)
 				struct file_dedupe_range_info ri;
 			} x;
 
-			x.r.src_offset = srcoff + off;
+			x.r.src_offset = srcblock * block_size + off;
 			x.r.src_length = block_size - off;
 			x.r.dest_count = 1;
 			x.r.reserved1 = 0;
 			x.r.reserved2 = 0;
 			x.ri.dest_fd = dst->f->fd;
-			x.ri.dest_offset = dstoff + off;
+			x.ri.dest_offset = dstblock * block_size + off;
 			x.ri.bytes_deduped = 0;
 			x.ri.status = 0;
 			x.ri.reserved = 0;
