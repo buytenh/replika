@@ -48,10 +48,12 @@ enum {
 	BLOCK_STATE_DIRTY_TRIMMED,
 };
 
-struct block
+#define BG_SIZE		8
+
+struct block_group
 {
 	pthread_rwlock_t	lock;
-	uint8_t		state;
+	uint8_t			state[BG_SIZE];
 };
 
 struct efes_file_info
@@ -61,7 +63,7 @@ struct efes_file_info
 	uint64_t	file_size;
 	uint64_t	numblocks;
 	int		mapfd;
-	struct block	block[0];
+	struct block_group	bg[0];
 };
 
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
@@ -115,6 +117,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	int ret;
 	int mapfd;
 	uint64_t numblocks;
+	uint64_t numbg;
 	struct efes_file_info *fh;
 
 	if (path[0] != '/') {
@@ -162,9 +165,9 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	}
 
 	numblocks = DIV_ROUND_UP(buf.st_size, block_size);
+	numbg = writable ? DIV_ROUND_UP(numblocks, BG_SIZE) : 0;
 
-	fh = malloc(sizeof(*fh) +
-		    (writable ? numblocks : 0) * sizeof(fh->block[0]));
+	fh = malloc(sizeof(*fh) + numbg * sizeof(fh->bg[0]));
 	if (fh == NULL) {
 		if (writable)
 			close(mapfd);
@@ -200,20 +203,26 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 		setbuffer(fp, mapbuf, sizeof(mapbuf));
 
+		for (i = 0; i < numbg; i++)
+			pthread_rwlock_init(&fh->bg[i].lock, NULL);
+
 		for (i = 0; i < numblocks; i++) {
 			uint8_t hash[hash_size];
 			int ret;
-
-			pthread_rwlock_init(&fh->block[i].lock, NULL);
+			struct block_group *bg;
+			int bgoff;
 
 			ret = fread(hash, hash_size, 1, fp);
 			if (ret < 1)
 				fseek(fp, (i + 1) * block_size, SEEK_SET);
 
+			bg = &fh->bg[i / BG_SIZE];
+			bgoff = i % BG_SIZE;
+
 			if (ret < 1 || !memcmp(hash, dirty_hash, hash_size))
-				fh->block[i].state = BLOCK_STATE_DIRTY;
+				bg->state[bgoff] = BLOCK_STATE_DIRTY;
 			else
-				fh->block[i].state = BLOCK_STATE_CLEAN;
+				bg->state[bgoff] = BLOCK_STATE_CLEAN;
 		}
 
 		fclose(fp);
@@ -265,8 +274,10 @@ static void close_cipher_handle(void *_hd)
 static int
 __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 {
-	off_t offset = block * block_size;
+	struct block_group *bg = &fh->bg[block / BG_SIZE];
+	int bgoff = block % BG_SIZE;
 	gcry_cipher_hd_t hd;
+	off_t offset;
 	uint8_t buf[block_size];
 	uint32_t *ptr;
 	uint64_t ctr;
@@ -275,10 +286,12 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 	uint8_t disk_hash[hash_size];
 	int ret;
 
-	if (fh->block[block].state != BLOCK_STATE_DIRTY_TRIMMED)
+	if (bg->state[bgoff] != BLOCK_STATE_DIRTY_TRIMMED)
 		abort();
 
 	hd = get_cipher_handle();
+
+	offset = block * block_size;
 
 	ptr = (uint32_t *)buf;
 	ctr = offset / 8;
@@ -311,9 +324,9 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 
 		if (make_clean) {
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-			fh->block[block].state = BLOCK_STATE_CLEAN;
+			bg->state[bgoff] = BLOCK_STATE_CLEAN;
 		} else {
-			fh->block[block].state = BLOCK_STATE_DIRTY;
+			bg->state[bgoff] = BLOCK_STATE_DIRTY;
 		}
 	}
 
@@ -322,19 +335,20 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 
 static int __flush_trim_for_reading(struct efes_file_info *fh, off_t block)
 {
-	struct block *b = &fh->block[block];
+	struct block_group *bg = &fh->bg[block / BG_SIZE];
+	int bgoff = block % BG_SIZE;
 	int ret;
 
 	ret = 0;
-	while (ret == 0 && b->state == BLOCK_STATE_DIRTY_TRIMMED) {
-		pthread_rwlock_unlock(&b->lock);
+	while (ret == 0 && bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED) {
+		pthread_rwlock_unlock(&bg->lock);
 
-		pthread_rwlock_wrlock(&b->lock);
-		if (b->state == BLOCK_STATE_DIRTY_TRIMMED)
+		pthread_rwlock_wrlock(&bg->lock);
+		if (bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED)
 			ret = __flush_trim_block(fh, block, 1);
-		pthread_rwlock_unlock(&b->lock);
+		pthread_rwlock_unlock(&bg->lock);
 
-		pthread_rwlock_rdlock(&b->lock);
+		pthread_rwlock_rdlock(&bg->lock);
 	}
 
 	return ret;
@@ -353,7 +367,7 @@ static int efes_read(const char *path, char *buf, size_t size,
 	while (processed < size) {
 		size_t toread;
 		off_t block;
-		struct block *b;
+		struct block_group *bg;
 		int ret;
 
 		if (offset >= fh->file_size)
@@ -366,19 +380,19 @@ static int efes_read(const char *path, char *buf, size_t size,
 			toread = block_size - (offset % block_size);
 
 		block = offset / block_size;
-		b = &fh->block[block];
+		bg = &fh->bg[block / BG_SIZE];
 
-		pthread_rwlock_rdlock(&b->lock);
+		pthread_rwlock_rdlock(&bg->lock);
 
 		ret = __flush_trim_for_reading(fh, block);
 		if (ret) {
-			pthread_rwlock_unlock(&b->lock);
+			pthread_rwlock_unlock(&bg->lock);
 			return ret;
 		}
 
 		ret = pread(fh->imgfd, buf, toread, offset);
 
-		pthread_rwlock_unlock(&b->lock);
+		pthread_rwlock_unlock(&bg->lock);
 
 		if (ret < 0)
 			return processed ? processed : -errno;
@@ -394,27 +408,28 @@ static int efes_read(const char *path, char *buf, size_t size,
 
 static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 {
-	struct block *b = &fh->block[block];
+	struct block_group *bg = &fh->bg[block / BG_SIZE];
+	int bgoff = block % BG_SIZE;
 	int ret;
 
 	ret = 0;
-	while (ret == 0 && b->state != BLOCK_STATE_DIRTY) {
-		pthread_rwlock_unlock(&b->lock);
+	while (ret == 0 && bg->state[bgoff] != BLOCK_STATE_DIRTY) {
+		pthread_rwlock_unlock(&bg->lock);
 
-		pthread_rwlock_wrlock(&b->lock);
-		if (b->state == BLOCK_STATE_CLEAN) {
+		pthread_rwlock_wrlock(&bg->lock);
+		if (bg->state[bgoff] == BLOCK_STATE_CLEAN) {
 			uint8_t hash[hash_size];
 
 			memset(hash, 0, hash_size);
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
-			b->state = BLOCK_STATE_DIRTY;
-		} else if (b->state == BLOCK_STATE_DIRTY_TRIMMED) {
+			bg->state[bgoff] = BLOCK_STATE_DIRTY;
+		} else if (bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED) {
 			ret = __flush_trim_block(fh, block, 0);
 		}
-		pthread_rwlock_unlock(&b->lock);
+		pthread_rwlock_unlock(&bg->lock);
 
-		pthread_rwlock_rdlock(&b->lock);
+		pthread_rwlock_rdlock(&bg->lock);
 	}
 
 	return ret;
@@ -436,7 +451,7 @@ static int efes_write(const char *path, const char *buf, size_t size,
 	while (processed < size) {
 		size_t towrite;
 		off_t block;
-		struct block *b;
+		struct block_group *bg;
 		int ret;
 
 		if (offset >= fh->file_size)
@@ -449,26 +464,28 @@ static int efes_write(const char *path, const char *buf, size_t size,
 			towrite = block_size - (offset % block_size);
 
 		block = offset / block_size;
-		b = &fh->block[block];
+		bg = &fh->bg[block / BG_SIZE];
 
 		if (towrite < block_size) {
-			pthread_rwlock_rdlock(&b->lock);
+			pthread_rwlock_rdlock(&bg->lock);
 
 			ret = __make_dirty_for_writing(fh, block);
 			if (ret) {
-				pthread_rwlock_unlock(&b->lock);
+				pthread_rwlock_unlock(&bg->lock);
 				return ret;
 			}
 
 			ret = pwrite(fh->imgfd, buf, towrite, offset);
 
-			pthread_rwlock_unlock(&b->lock);
+			pthread_rwlock_unlock(&bg->lock);
 		} else {
+			int bgoff;
 			uint8_t hash[hash_size];
 
-			pthread_rwlock_wrlock(&b->lock);
+			pthread_rwlock_wrlock(&bg->lock);
 
-			if (b->state == BLOCK_STATE_CLEAN) {
+			bgoff = block % BG_SIZE;
+			if (bg->state[bgoff] == BLOCK_STATE_CLEAN) {
 				memset(hash, 0, hash_size);
 				xpwrite(fh->mapfd, hash, hash_size,
 					block * hash_size);
@@ -479,9 +496,9 @@ static int efes_write(const char *path, const char *buf, size_t size,
 			gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
-			b->state = BLOCK_STATE_CLEAN;
+			bg->state[bgoff] = BLOCK_STATE_CLEAN;
 
-			pthread_rwlock_unlock(&b->lock);
+			pthread_rwlock_unlock(&bg->lock);
 
 			ret = block_size;
 		}
@@ -530,7 +547,8 @@ static void *commit_thread(void *_me)
 
 	while (1) {
 		off_t block;
-		struct block *b;
+		struct block_group *bg;
+		int bgoff;
 		uint8_t buf[block_size];
 		int ret;
 		uint8_t hash[hash_size];
@@ -538,8 +556,10 @@ static void *commit_thread(void *_me)
 		xsem_wait(&me->sem0);
 
 		for (block = cs->block; block < fh->numblocks; block++) {
-			b = &fh->block[block];
-			if (b->state != BLOCK_STATE_CLEAN)
+			bg = &fh->bg[block / BG_SIZE];
+			bgoff = block % BG_SIZE;
+
+			if (bg->state[bgoff] != BLOCK_STATE_CLEAN)
 				break;
 		}
 
@@ -563,7 +583,7 @@ static void *commit_thread(void *_me)
 
 		xsem_post(&me->next->sem0);
 
-		if (b->state == BLOCK_STATE_DIRTY) {
+		if (bg->state[bgoff] == BLOCK_STATE_DIRTY) {
 			off_t off = block * block_size;
 
 			ret = xpread(fh->imgfd, buf, block_size, off);
@@ -580,7 +600,7 @@ static void *commit_thread(void *_me)
 			}
 
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-		} else if (b->state == BLOCK_STATE_DIRTY_TRIMMED) {
+		} else if (bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED) {
 			ret = __flush_trim_block(fh, block, 1);
 		}
 	}
@@ -596,7 +616,9 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 	num_dirty = 0;
 	for (i = 0; i < fh->numblocks; i++) {
-		if (fh->block[i].state != BLOCK_STATE_CLEAN)
+		struct block_group *bg = &fh->bg[i / BG_SIZE];
+
+		if (bg->state[i % BG_SIZE] != BLOCK_STATE_CLEAN)
 			num_dirty++;
 	}
 
@@ -622,13 +644,15 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 	struct efes_file_info *fh = (void *)fi->fh;
 
 	if (fh->writable) {
+		uint64_t numbg;
 		uint64_t i;
 
 		update_mapfile(fh, path);
 		close(fh->mapfd);
 
-		for (i = 0; i < fh->numblocks; i++)
-			pthread_rwlock_destroy(&fh->block[i].lock);
+		numbg = DIV_ROUND_UP(fh->numblocks, BG_SIZE);
+		for (i = 0; i < numbg; i++)
+			pthread_rwlock_destroy(&fh->bg[i].lock);
 	}
 	close(fh->imgfd);
 	free(fh);
@@ -738,7 +762,7 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 	while (len) {
 		size_t totrim;
 		off_t block;
-		struct block *b;
+		struct block_group *bg;
 		int ret;
 
 		if (offset >= fh->file_size)
@@ -751,7 +775,7 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 			totrim = block_size - (offset % block_size);
 
 		block = offset / block_size;
-		b = &fh->block[block];
+		bg = &fh->bg[block / BG_SIZE];
 
 		if (totrim < block_size) {
 			uint8_t buf[block_size];
@@ -774,26 +798,26 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 				return -EIO;
 			}
 
-			pthread_rwlock_rdlock(&b->lock);
+			pthread_rwlock_rdlock(&bg->lock);
 
 			ret = __make_dirty_for_writing(fh, block);
 			if (ret) {
-				pthread_rwlock_unlock(&b->lock);
+				pthread_rwlock_unlock(&bg->lock);
 				return ret;
 			}
 
 			ret = pwrite(fh->imgfd, buf, totrim, offset);
 			if (ret < 0) {
 				ret = -errno;
-				pthread_rwlock_unlock(&b->lock);
+				pthread_rwlock_unlock(&bg->lock);
 				return ret;
 			}
 
-			pthread_rwlock_unlock(&b->lock);
+			pthread_rwlock_unlock(&bg->lock);
 		} else {
-			pthread_rwlock_wrlock(&b->lock);
-			b->state = BLOCK_STATE_DIRTY_TRIMMED;
-			pthread_rwlock_unlock(&b->lock);
+			pthread_rwlock_wrlock(&bg->lock);
+			bg->state[block % BG_SIZE] = BLOCK_STATE_DIRTY_TRIMMED;
+			pthread_rwlock_unlock(&bg->lock);
 
 			ret = block_size;
 		}
