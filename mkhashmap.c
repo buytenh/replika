@@ -62,7 +62,8 @@ static void *hash_thread(void *_me)
 
 		xsem_post(&me->next->sem0);
 
-		if (ret < block_size && off != sizeblocks - 1) {
+		if ((ret < block_size && off != sizeblocks - 1) ||
+		    (ret <= 0 && off == sizeblocks - 1)) {
 			fprintf(stderr, "short read on block %Ld\n",
 				(long long)off);
 			memset(hash, 0, hash_size);

@@ -547,7 +547,8 @@ static void *commit_thread(void *_me)
 			off_t off = block * block_size;
 
 			ret = xpread(fh->imgfd, buf, block_size, off);
-			if (ret < block_size && block != fh->numblocks - 1) {
+			if ((ret < block_size && block != fh->numblocks - 1) ||
+			    (ret <= 0 && block == fh->numblocks - 1)) {
 				fprintf(stderr, "commit_thread: short "
 						"read on block %Ld\n",
 					(long long)block);

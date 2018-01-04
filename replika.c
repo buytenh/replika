@@ -139,7 +139,8 @@ static void *copy_thread_no_hashmap(void *_me)
 
 		xsem_post(&me->next->sem0);
 
-		if (ret < block_size && off != sizeblocks - 1) {
+		if ((ret < block_size && off != sizeblocks - 1) ||
+		    (ret <= 0 && off == sizeblocks - 1)) {
 			fprintf(stderr, "short read\n");
 			break;
 		}
@@ -222,7 +223,8 @@ static void *copy_thread_hashmap(void *_me)
 
 		xsem_post(&me->next->sem0);
 
-		if (ret < block_size && off != sizeblocks - 1) {
+		if ((ret < block_size && off != sizeblocks - 1) ||
+		    (ret <= 0 && off == sizeblocks - 1)) {
 			fprintf(stderr, "short read\n");
 			break;
 		}
