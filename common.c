@@ -74,13 +74,11 @@ ssize_t xpread(int fd, void *buf, size_t count, off_t offset)
 			ret = pread(fd, buf, count - processed, offset);
 		} while (ret < 0 && errno == EINTR);
 
-		if (ret < 0) {
-			perror("pread");
-			exit(1);
+		if (ret <= 0) {
+			if (ret < 0)
+				perror("pread");
+			return processed ? processed : ret;
 		}
-
-		if (ret == 0)
-			break;
 
 		buf += ret;
 		offset += ret;
