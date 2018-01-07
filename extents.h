@@ -21,6 +21,12 @@
 #define __EXTENTS_H
 
 #include <stdint.h>
+#include <iv_avl.h>
+
+int extent_tree_build(struct iv_avl_tree *extents, int fd);
+int extent_tree_diff(struct iv_avl_tree *a, struct iv_avl_tree *b,
+		     uint64_t off, uint64_t length);
+void extent_tree_free(struct iv_avl_tree *extents);
 
 int compare_file_mappings(uint8_t *dst, int a, int b,
 			  uint64_t num_blocks, uint64_t block_size);

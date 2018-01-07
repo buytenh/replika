@@ -67,7 +67,7 @@ static int can_merge(struct extent *last, struct fiemap_extent *fe)
 	return 1;
 }
 
-static int map_fd(struct iv_avl_tree *extents, int fd)
+int extent_tree_build(struct iv_avl_tree *extents, int fd)
 {
 	uint64_t off;
 	struct extent *last;
@@ -167,8 +167,8 @@ static struct extent *find_next_extent(struct extent *e)
 	return NULL;
 }
 
-static int diff_blocks(struct iv_avl_tree *a, struct iv_avl_tree *b,
-		       uint64_t off, uint64_t length)
+int extent_tree_diff(struct iv_avl_tree *a, struct iv_avl_tree *b,
+		     uint64_t off, uint64_t length)
 {
 	struct extent *ae;
 	struct extent *be;
@@ -224,7 +224,7 @@ static void __free_element(struct iv_avl_node *an)
 	free(e);
 }
 
-static void free_extent_tree(struct iv_avl_tree *extents)
+void extent_tree_free(struct iv_avl_tree *extents)
 {
 	if (extents->root != NULL)
 		__free_element(extents->root);
@@ -240,23 +240,25 @@ int compare_file_mappings(uint8_t *dst, int a, int b,
 
 	ret = 0;
 
-	if (map_fd(&aext, a) < 0) {
+	if (extent_tree_build(&aext, a) < 0) {
 		ret = -1;
 		goto out_free_a;
 	}
 
-	if (map_fd(&bext, b) < 0) {
+	if (extent_tree_build(&bext, b) < 0) {
 		ret = -1;
 		goto out;
 	}
 
-	for (i = 0; i < num_blocks; i++)
-		dst[i] = diff_blocks(&aext, &bext, i * block_size, block_size);
+	for (i = 0; i < num_blocks; i++) {
+		off_t off = i * block_size;
+		dst[i] = extent_tree_diff(&aext, &bext, off, block_size);
+	}
 
 out:
-	free_extent_tree(&bext);
+	extent_tree_free(&bext);
 out_free_a:
-	free_extent_tree(&aext);
+	extent_tree_free(&aext);
 
 	return ret;
 }
