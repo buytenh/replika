@@ -283,8 +283,9 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 	uint64_t ctr;
 	int i;
 	uint8_t hash[hash_size];
+	off_t hash_off;
 	uint8_t disk_hash[hash_size];
-	int ret;
+	uint8_t dirty_hash[hash_size];
 
 	if (bg->state[bgoff] != BLOCK_STATE_DIRTY_TRIMMED)
 		abort();
@@ -309,26 +310,25 @@ __flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
 
 	gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
 
-	ret = xpread(fh->mapfd, disk_hash, hash_size, block * hash_size);
-	if (ret < hash_size || memcmp(hash, disk_hash, hash_size)) {
-		uint8_t dirty_hash[hash_size];
+	hash_off = block * hash_size;
+	if (xpread(fh->mapfd, disk_hash, hash_size, hash_off) < hash_size)
+		memset(disk_hash, 0xff, hash_size);
 
-		memset(dirty_hash, 0, hash_size);
-		if (ret < hash_size ||
-		    memcmp(disk_hash, dirty_hash, hash_size)) {
-			xpwrite(fh->mapfd, dirty_hash, hash_size,
-				block * hash_size);
-		}
+	memset(dirty_hash, 0, hash_size);
+
+	if (memcmp(hash, disk_hash, hash_size)) {
+		if (memcmp(disk_hash, dirty_hash, hash_size))
+			xpwrite(fh->mapfd, dirty_hash, hash_size, hash_off);
 
 		xpwrite(fh->imgfd, buf, block_size, offset);
 
-		if (make_clean) {
-			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-			bg->state[bgoff] = BLOCK_STATE_CLEAN;
-		} else {
-			bg->state[bgoff] = BLOCK_STATE_DIRTY;
-		}
+		if (make_clean)
+			xpwrite(fh->mapfd, hash, hash_size, hash_off);
+	} else if (!make_clean) {
+		xpwrite(fh->mapfd, dirty_hash, hash_size, hash_off);
 	}
+
+	bg->state[bgoff] = make_clean ? BLOCK_STATE_CLEAN : BLOCK_STATE_DIRTY;
 
 	return 0;
 }
