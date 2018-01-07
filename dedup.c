@@ -182,7 +182,7 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	readonly = 0;
 
 	imgfd = open(imgfile, O_RDWR);
-	if (imgfd < 0 && errno == EACCES) {
+	if (imgfd < 0 && (errno == EACCES || errno == EPERM)) {
 		readonly = 1;
 		imgfd = open(imgfile, O_RDONLY);
 	}
