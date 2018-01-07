@@ -233,18 +233,30 @@ static void free_extent_tree(struct iv_avl_tree *extents)
 int compare_file_mappings(uint8_t *dst, int a, int b,
 			  uint64_t num_blocks, uint64_t block_size)
 {
+	int ret;
 	struct iv_avl_tree aext;
 	struct iv_avl_tree bext;
 	uint64_t i;
 
-	if (map_fd(&aext, a) < 0 || map_fd(&bext, b) < 0)
-		return -1;
+	ret = 0;
+
+	if (map_fd(&aext, a) < 0) {
+		ret = -1;
+		goto out_free_a;
+	}
+
+	if (map_fd(&bext, b) < 0) {
+		ret = -1;
+		goto out;
+	}
 
 	for (i = 0; i < num_blocks; i++)
 		dst[i] = diff_blocks(&aext, &bext, i * block_size, block_size);
 
-	free_extent_tree(&aext);
+out:
 	free_extent_tree(&bext);
+out_free_a:
+	free_extent_tree(&aext);
 
-	return 0;
+	return ret;
 }
