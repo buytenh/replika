@@ -715,7 +715,6 @@ static int efes_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		d_type = dent->d_type;
 		if (d_type == DT_UNKNOWN) {
 			struct stat sbuf;
-			int ret;
 
 			ret = fstatat(backing_dir_fd, dent->d_name,
 				      &sbuf, AT_SYMLINK_NOFOLLOW);
