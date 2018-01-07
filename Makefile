@@ -3,8 +3,8 @@ all:		dedup efes mkhashmap mkhashmapref mkrand replika
 clean:
 		rm -f dedup efes mkhashmap mkhashmapref mkrand replika
 
-dedup:		dedup.c common.c common.h
-		gcc -Wall -o dedup dedup.c common.c `libgcrypt-config --cflags --libs` `pkg-config --cflags --libs ivykis` -lpthread
+dedup:		dedup.c common.c common.h extents.c extents.h
+		gcc -Wall -o dedup dedup.c common.c extents.c `libgcrypt-config --cflags --libs` `pkg-config --cflags --libs ivykis` -lpthread
 
 efes:		efes.c common.c common.h
 		gcc -Wall -o efes efes.c common.c `pkg-config fuse --cflags --libs` `libgcrypt-config --cflags --libs` -lpthread

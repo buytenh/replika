@@ -1,6 +1,6 @@
 /*
  * replika, a set of tools for dealing with hashmapped disk images
- * Copyright (C) 2017 Lennert Buytenhek
+ * Copyright (C) 2017, 2018 Lennert Buytenhek
  *
  * This library is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version
@@ -31,6 +31,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include "common.h"
+#include "extents.h"
 
 #ifndef FIDEDUPERANGE
 #define FIDEDUPERANGE	_IOWR(0x94, 54, struct file_dedupe_range)
@@ -78,6 +79,7 @@ struct file
 	const char		*name;
 	int			fd;
 	uint64_t		blocks;
+	struct iv_avl_tree	extent_tree;
 	struct hashref		refs[0];
 };
 
@@ -237,6 +239,11 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	f->fd = imgfd;
 	f->blocks = sizeblocks;
 
+	if (extent_tree_build(&f->extent_tree, imgfd) < 0) {
+		fprintf(stderr, "error building extent tree for %s\n", imgfile);
+		exit(1);
+	}
+
 	memset(dirty_hash, 0, sizeof(dirty_hash));
 
 	for (i = 0; i < sizeblocks; i++) {
@@ -292,6 +299,13 @@ static void dedup_block_hash(struct block_hash *bh)
 			continue;
 
 		dstblock = dst - dst->f->refs;
+
+		if (srcblock == dstblock &&
+		    !extent_tree_diff(&src->f->extent_tree,
+				      &dst->f->extent_tree,
+				      srcblock * block_size, block_size)) {
+			continue;
+		}
 
 		if (dry_run || verbose) {
 			if (!src_printed) {
@@ -386,6 +400,7 @@ static void destroy(void)
 
 		f = iv_container_of(lh, struct file, list);
 		iv_list_del(&f->list);
+		extent_tree_free(&f->extent_tree);
 		free(f);
 	}
 
