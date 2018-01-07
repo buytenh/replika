@@ -385,6 +385,7 @@ static void destroy(void)
 		struct file *f;
 
 		f = iv_container_of(lh, struct file, list);
+		iv_list_del(&f->list);
 		free(f);
 	}
 
@@ -392,6 +393,7 @@ static void destroy(void)
 		struct block_hash *bh;
 
 		bh = iv_container_of(an, struct block_hash, an);
+		iv_avl_tree_delete(&block_hashes, &bh->an);
 		free(bh);
 	}
 }
