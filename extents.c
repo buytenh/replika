@@ -29,7 +29,7 @@
 #include <sys/ioctl.h>
 #include "extents.h"
 
-#define EXTENTS_BATCH		1024
+#define EXTENTS_BATCH		16384
 
 struct extent
 {
