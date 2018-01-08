@@ -203,6 +203,10 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	}
 
 	sizeblocks = (imgsize + block_size - 1) / block_size;
+	if (sizeblocks == 0) {
+		close(imgfd);
+		return;
+	}
 
 	mapf = fopen(mapfile, "r");
 	if (mapf == NULL) {
@@ -273,20 +277,16 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	fclose(mapf);
 }
 
-static void dedup_block_hash(struct block_hash *bh)
+static void dedup_block_hash(struct iv_avl_node *min)
 {
 	struct iv_avl_node *an;
 	struct hashref *src;
 	off_t srcblock;
 
-	an = iv_avl_tree_min(&bh->refs);
-	if (an == NULL)
-		return;
-
-	src = iv_container_of(an, struct hashref, an);
+	src = iv_container_of(min, struct hashref, an);
 	srcblock = src - src->f->refs;
 
-	an = iv_avl_tree_next(an);
+	an = iv_avl_tree_next(min);
 
 	while (an != NULL) {
 		struct hashref *dst;
@@ -359,25 +359,73 @@ static void dedup_block_hash(struct block_hash *bh)
 			off += x.ri.bytes_deduped;
 		}
 	}
+}
 
-	bh->refs.root = NULL;
+struct dedup_state
+{
+	struct file	*f;
+	off_t		block;
+};
+
+static void *dedup_thread(void *_me)
+{
+	struct worker_thread *me = _me;
+	struct dedup_state *ds = me->cookie;
+
+	xsem_wait(&me->sem0);
+
+	while (1) {
+		struct file *f;
+		off_t block;
+		struct block_hash *bh;
+		struct iv_avl_node *an;
+
+		f = ds->f;
+		if (f == NULL)
+			break;
+
+		block = ds->block;
+		if (block == 0 && (dry_run || verbose))
+			printf("deduping blocks from %s\n", f->name);
+
+		ds->block++;
+		if (ds->block == f->blocks) {
+			struct iv_list_head *lh;
+
+			lh = f->list.next;
+			if (lh != &files)
+				ds->f = iv_container_of(lh, struct file, list);
+			else
+				ds->f = NULL;
+
+			ds->block = 0;
+		}
+
+		bh = f->refs[block].bh;
+
+		an = iv_avl_tree_min(&bh->refs);
+		if (an != NULL) {
+			bh->refs.root = NULL;
+
+			xsem_post(&me->next->sem0);
+			dedup_block_hash(an);
+			xsem_wait(&me->sem0);
+		}
+	}
+
+	xsem_post(&me->next->sem0);
+
+	return NULL;
 }
 
 static void scandups(void)
 {
-	struct iv_list_head *lh;
+	if (!iv_list_empty(&files)) {
+		struct dedup_state ds;
 
-	iv_list_for_each (lh, &files) {
-		struct file *f;
-		off_t i;
-
-		f = iv_container_of(lh, struct file, list);
-
-		if (dry_run || verbose)
-			printf("deduping blocks from %s\n", f->name);
-
-		for (i = 0; i < f->blocks; i++)
-			dedup_block_hash(f->refs[i].bh);
+		ds.f = iv_container_of(files.next, struct file, list);
+		ds.block = 0;
+		run_threads(dedup_thread, &ds);
 	}
 }
 
