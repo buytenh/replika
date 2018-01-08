@@ -179,6 +179,9 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	uint8_t dirty_hash[hash_size];
 	off_t i;
 
+	if (verbose)
+		printf("scanning file %s\n", imgfile);
+
 	readonly = 0;
 
 	imgfd = open(imgfile, O_RDWR);
