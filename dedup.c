@@ -303,10 +303,10 @@ static void dedup_block_hash(struct block_hash *bh)
 
 		dstblock = dst - dst->f->refs;
 
-		if (srcblock == dstblock &&
-		    !extent_tree_diff(&src->f->extent_tree,
+		if (!extent_tree_diff(&src->f->extent_tree,
+				      srcblock * block_size,
 				      &dst->f->extent_tree,
-				      srcblock * block_size, block_size)) {
+				      dstblock * block_size, block_size)) {
 			continue;
 		}
 

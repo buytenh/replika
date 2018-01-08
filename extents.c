@@ -167,42 +167,44 @@ static struct extent *find_next_extent(struct extent *e)
 	return NULL;
 }
 
-int extent_tree_diff(struct iv_avl_tree *a, struct iv_avl_tree *b,
-		     uint64_t off, uint64_t length)
+int extent_tree_diff(struct iv_avl_tree *a, uint64_t aoff,
+		     struct iv_avl_tree *b, uint64_t boff, uint64_t length)
 {
 	struct extent *ae;
 	struct extent *be;
 
-	ae = find_extent(a, off);
-	be = find_extent(b, off);
+	ae = find_extent(a, aoff);
+	be = find_extent(b, boff);
 
 	while (length) {
-		uint64_t aoff;
-		uint64_t boff;
+		uint64_t adelta;
+		uint64_t bdelta;
 		uint64_t toadvance;
 
-		if (ae == NULL || off < ae->fe_logical)
+		if (ae == NULL || aoff < ae->fe_logical)
 			return 1;
 
-		if (be == NULL || off < be->fe_logical)
+		if (be == NULL || boff < be->fe_logical)
 			return 1;
 
-		aoff = off - ae->fe_logical;
-		boff = off - be->fe_logical;
+		adelta = aoff - ae->fe_logical;
+		bdelta = boff - be->fe_logical;
 
-		if (ae->fe_physical + aoff != be->fe_physical + boff)
+		if (ae->fe_physical + adelta != be->fe_physical + bdelta)
 			return 1;
 
 		toadvance = length;
-		if (toadvance > ae->fe_length - aoff)
-			toadvance = ae->fe_length - aoff;
-		if (toadvance > be->fe_length - boff)
-			toadvance = be->fe_length - boff;
+		if (toadvance > ae->fe_length - adelta)
+			toadvance = ae->fe_length - adelta;
+		if (toadvance > be->fe_length - bdelta)
+			toadvance = be->fe_length - bdelta;
 
-		off += toadvance;
-		if (off == ae->fe_logical + ae->fe_length)
+		aoff += toadvance;
+		if (aoff == ae->fe_logical + ae->fe_length)
 			ae = find_next_extent(ae);
-		if (off == be->fe_logical + be->fe_length)
+
+		boff += toadvance;
+		if (boff == be->fe_logical + be->fe_length)
 			be = find_next_extent(be);
 
 		length -= toadvance;
@@ -252,7 +254,7 @@ int compare_file_mappings(uint8_t *dst, int a, int b,
 
 	for (i = 0; i < num_blocks; i++) {
 		off_t off = i * block_size;
-		dst[i] = extent_tree_diff(&aext, &bext, off, block_size);
+		dst[i] = extent_tree_diff(&aext, off, &bext, off, block_size);
 	}
 
 out:
