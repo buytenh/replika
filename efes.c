@@ -192,13 +192,22 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 		mapfd2 = dup(mapfd);
 		if (mapfd2 < 0) {
 			perror("dup");
-			exit(1);
+			if (writable)
+				close(mapfd);
+			close(imgfd);
+			free(fh);
+			return -EIO;
 		}
 
 		fp = fdopen(mapfd2, "r");
 		if (fp == NULL) {
 			perror("fdopen");
-			exit(1);
+			close(mapfd2);
+			if (writable)
+				close(mapfd);
+			close(imgfd);
+			free(fh);
+			return -EIO;
 		}
 
 		setbuffer(fp, mapbuf, sizeof(mapbuf));
