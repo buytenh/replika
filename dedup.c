@@ -278,7 +278,6 @@ static void dedup_block_hash(struct block_hash *bh)
 	struct iv_avl_node *an;
 	struct hashref *src;
 	off_t srcblock;
-	int src_printed;
 
 	an = iv_avl_tree_min(&bh->refs);
 	if (an == NULL)
@@ -289,7 +288,6 @@ static void dedup_block_hash(struct block_hash *bh)
 
 	an = iv_avl_tree_next(an);
 
-	src_printed = 0;
 	while (an != NULL) {
 		struct hashref *dst;
 		off_t dstblock;
@@ -311,14 +309,9 @@ static void dedup_block_hash(struct block_hash *bh)
 		}
 
 		if (dry_run || verbose) {
-			if (!src_printed) {
-				printf("src: %s block %Ld\n", src->f->name,
-				       (long long)srcblock);
-				src_printed = 1;
-			}
-
-			printf("dst: %s block %Ld\n", dst->f->name,
-			       (long long)dstblock);
+			printf("%s %Ld => %s %Ld\n",
+			       src->f->name, (long long)srcblock,
+			       dst->f->name, (long long)dstblock);
 		}
 
 		if (dry_run)
@@ -366,9 +359,6 @@ static void dedup_block_hash(struct block_hash *bh)
 			off += x.ri.bytes_deduped;
 		}
 	}
-
-	if ((dry_run || verbose) && src_printed)
-		printf("\n");
 
 	bh->refs.root = NULL;
 }
