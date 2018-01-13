@@ -300,18 +300,20 @@ static int count_block_hashes(void)
 	return count;
 }
 
-static void
+static int
 dedup_block_hash(struct iv_avl_node *min, int bh_index, int bh_count)
 {
-	struct iv_avl_node *an;
 	struct hashref *src;
 	off_t srcblock;
+	int count;
+	struct iv_avl_node *an;
 
 	src = iv_container_of(min, struct hashref, an);
 	srcblock = src - src->f->refs;
 
-	an = iv_avl_tree_next(min);
+	count = 0;
 
+	an = iv_avl_tree_next(min);
 	while (an != NULL) {
 		struct hashref *dst;
 		off_t dstblock;
@@ -332,14 +334,16 @@ dedup_block_hash(struct iv_avl_node *min, int bh_index, int bh_count)
 			continue;
 		}
 
-		if (dry_run || verbose) {
+		count++;
+
+		if ((dry_run || verbose) && bh_count) {
 			printf("[%d/%d] %s %Ld => %s %Ld\n",
 			       bh_index, bh_count,
 			       src->f->name, (long long)srcblock,
 			       dst->f->name, (long long)dstblock);
 		}
 
-		if (dry_run)
+		if (dry_run || bh_count == 0)
 			continue;
 
 		off = 0;
@@ -384,6 +388,8 @@ dedup_block_hash(struct iv_avl_node *min, int bh_index, int bh_count)
 			off += x.ri.bytes_deduped;
 		}
 	}
+
+	return count;
 }
 
 struct dedup_state
