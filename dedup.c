@@ -277,31 +277,8 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	fclose(mapf);
 }
 
-static int count_block_hashes(void)
-{
-	int count;
-	struct iv_avl_node *an;
-
-	count = 0;
-	iv_avl_tree_for_each(an, &block_hashes) {
-		struct block_hash *bh;
-		struct iv_avl_node *an2;
-
-		bh = iv_container_of(an, struct block_hash, an);
-
-		an2 = iv_avl_tree_min(&bh->refs);
-		if (an2 != NULL) {
-			an2 = iv_avl_tree_next(an2);
-			if (an2 != NULL)
-				count++;
-		}
-	}
-
-	return count;
-}
-
 static int
-dedup_block_hash(struct iv_avl_node *min, int bh_index, int bh_count)
+dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 {
 	struct hashref *src;
 	off_t srcblock;
@@ -336,14 +313,15 @@ dedup_block_hash(struct iv_avl_node *min, int bh_index, int bh_count)
 
 		count++;
 
-		if ((dry_run || verbose) && bh_count) {
+		if ((dry_run || verbose) && dedup_count) {
 			printf("[%d/%d] %s %Ld => %s %Ld\n",
-			       bh_index, bh_count,
+			       dedup_index, dedup_count,
 			       src->f->name, (long long)srcblock,
 			       dst->f->name, (long long)dstblock);
+			dedup_index++;
 		}
 
-		if (dry_run || bh_count == 0)
+		if (dry_run || dedup_count == 0)
 			continue;
 
 		off = 0;
@@ -392,12 +370,41 @@ dedup_block_hash(struct iv_avl_node *min, int bh_index, int bh_count)
 	return count;
 }
 
+static int count_dedup_operations(void)
+{
+	int count;
+	struct iv_list_head *lh;
+
+	count = 0;
+	iv_list_for_each (lh, &files) {
+		struct file *f;
+		int i;
+
+		f = iv_container_of(lh, struct file, list);
+
+		for (i = 0; i < f->blocks; i++) {
+			struct iv_avl_node *min;
+
+			min = iv_avl_tree_min(&f->refs[i].bh->refs);
+			if (min == NULL)
+				continue;
+
+			if (f != iv_container_of(min, struct hashref, an)->f)
+				continue;
+
+			count += dedup_block_hash(min, 0, 0);
+		}
+	}
+
+	return count;
+}
+
 struct dedup_state
 {
 	struct file	*f;
 	off_t		block;
-	int		bh_index;
-	int		bh_count;
+	int		dedup_index;
+	int		dedup_count;
 };
 
 static void *dedup_thread(void *_me)
@@ -438,18 +445,22 @@ static void *dedup_thread(void *_me)
 
 		an = iv_avl_tree_min(&bh->refs);
 		if (an != NULL) {
+			int count;
 			struct iv_avl_node *an2;
 
 			bh->refs.root = NULL;
+
+			count = dedup_block_hash(an, 0, 0);
 
 			an2 = iv_avl_tree_next(an);
 			if (an2 != NULL) {
 				int index;
 
-				index = ++ds->bh_index;
+				index = ds->dedup_index;
+				ds->dedup_index += count;
 
 				xsem_post(&me->next->sem0);
-				dedup_block_hash(an, index, ds->bh_count);
+				dedup_block_hash(an, index, ds->dedup_count);
 				xsem_wait(&me->sem0);
 			}
 		}
@@ -464,14 +475,14 @@ static void scandups(void)
 {
 	int count;
 
-	count = count_block_hashes();
+	count = count_dedup_operations();
 	if (count) {
 		struct dedup_state ds;
 
 		ds.f = iv_container_of(files.next, struct file, list);
 		ds.block = 0;
-		ds.bh_index = 0;
-		ds.bh_count = count;
+		ds.dedup_index = 1;
+		ds.dedup_count = count;
 		run_threads(dedup_thread, &ds);
 	}
 }
