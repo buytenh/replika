@@ -358,15 +358,16 @@ dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 			continue;
 		}
 
-		count++;
-
-		if ((dry_run || verbose) && dedup_count) {
+		if (dedup_count &&
+		    (dry_run || (verbose && should_report_progress()))) {
 			printf("[%d/%d] %s %Ld => %s %Ld\n",
 			       dedup_index, dedup_count,
 			       src->f->name, (long long)srcblock,
 			       dst->f->name, (long long)dstblock);
-			dedup_index++;
 		}
+
+		dedup_index++;
+		count++;
 
 		if (dry_run || dedup_count == 0)
 			continue;
