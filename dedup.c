@@ -324,6 +324,12 @@ dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 		if (dry_run || dedup_count == 0)
 			continue;
 
+		posix_fadvise(src->f->fd, srcblock * block_size,
+			      16 * block_size, POSIX_FADV_WILLNEED);
+
+		posix_fadvise(dst->f->fd, dstblock * block_size,
+			      16 * block_size, POSIX_FADV_WILLNEED);
+
 		off = 0;
 		while (off < block_size) {
 			struct {
