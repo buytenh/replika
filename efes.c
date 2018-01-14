@@ -478,6 +478,9 @@ static int efes_write(const char *path, const char *buf, size_t size,
 	if (!fh->writable)
 		return -EBADF;
 
+	if (offset >= fh->file_size)
+		return -ENOSPC;
+
 	if (size > INT_MAX)
 		size = INT_MAX;
 
