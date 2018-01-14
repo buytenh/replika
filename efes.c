@@ -475,42 +475,17 @@ static int efes_write(const char *path, const char *buf, size_t size,
 		block = offset / block_size;
 		bg = &fh->bg[block / BG_SIZE];
 
-		if (towrite < block_size) {
-			pthread_rwlock_rdlock(&bg->lock);
+		pthread_rwlock_rdlock(&bg->lock);
 
-			ret = __make_dirty_for_writing(fh, block);
-			if (ret) {
-				pthread_rwlock_unlock(&bg->lock);
-				return ret;
-			}
-
-			ret = pwrite(fh->imgfd, buf, towrite, offset);
-
+		ret = __make_dirty_for_writing(fh, block);
+		if (ret) {
 			pthread_rwlock_unlock(&bg->lock);
-		} else {
-			int bgoff;
-			uint8_t hash[hash_size];
-
-			pthread_rwlock_wrlock(&bg->lock);
-
-			bgoff = block % BG_SIZE;
-			if (bg->state[bgoff] == BLOCK_STATE_CLEAN) {
-				memset(hash, 0, hash_size);
-				xpwrite(fh->mapfd, hash, hash_size,
-					block * hash_size);
-			}
-
-			xpwrite(fh->imgfd, buf, block_size, offset);
-
-			gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
-			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-
-			bg->state[bgoff] = BLOCK_STATE_CLEAN;
-
-			pthread_rwlock_unlock(&bg->lock);
-
-			ret = block_size;
+			return ret;
 		}
+
+		ret = pwrite(fh->imgfd, buf, towrite, offset);
+
+		pthread_rwlock_unlock(&bg->lock);
 
 		if (ret < 0)
 			return processed ? processed : -errno;
