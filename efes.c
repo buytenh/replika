@@ -415,6 +415,31 @@ static int efes_read(const char *path, char *buf, size_t size,
 	return processed;
 }
 
+static int __can_elide_write(struct efes_file_info *fh, const void *buf,
+			     size_t count, off_t offset)
+{
+	off_t block;
+	struct block_group *bg;
+	int bgoff;
+	uint8_t vbuf[count];
+
+	block = offset / block_size;
+
+	bg = &fh->bg[block / BG_SIZE];
+	bgoff = block % BG_SIZE;
+
+	if (bg->state[bgoff] != BLOCK_STATE_CLEAN)
+		return 0;
+
+	if (xpread(fh->imgfd, vbuf, count, offset) < count)
+		return 0;
+
+	if (memcmp(buf, vbuf, count))
+		return 0;
+
+	return 1;
+}
+
 static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 {
 	struct block_group *bg = &fh->bg[block / BG_SIZE];
@@ -477,13 +502,17 @@ static int efes_write(const char *path, const char *buf, size_t size,
 
 		pthread_rwlock_rdlock(&bg->lock);
 
-		ret = __make_dirty_for_writing(fh, block);
-		if (ret) {
-			pthread_rwlock_unlock(&bg->lock);
-			return ret;
-		}
+		if (__can_elide_write(fh, buf, towrite, offset)) {
+			ret = towrite;
+		} else {
+			ret = __make_dirty_for_writing(fh, block);
+			if (ret) {
+				pthread_rwlock_unlock(&bg->lock);
+				return ret;
+			}
 
-		ret = pwrite(fh->imgfd, buf, towrite, offset);
+			ret = pwrite(fh->imgfd, buf, towrite, offset);
+		}
 
 		pthread_rwlock_unlock(&bg->lock);
 
