@@ -277,6 +277,54 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	fclose(mapf);
 }
 
+static void
+dedup_file_range(int dstfd, off_t dstblock, int srcfd, off_t srcblock)
+{
+	off_t off;
+
+	off = 0;
+	while (off < block_size) {
+		struct {
+			struct file_dedupe_range r;
+			struct file_dedupe_range_info ri;
+		} x;
+
+		x.r.src_offset = srcblock * block_size + off;
+		x.r.src_length = block_size - off;
+		x.r.dest_count = 1;
+		x.r.reserved1 = 0;
+		x.r.reserved2 = 0;
+		x.ri.dest_fd = dstfd;
+		x.ri.dest_offset = dstblock * block_size + off;
+		x.ri.bytes_deduped = 0;
+		x.ri.status = 0;
+		x.ri.reserved = 0;
+
+		if (ioctl(srcfd, FIDEDUPERANGE, &x) < 0) {
+			perror("ioctl");
+			break;
+		}
+
+		if (x.ri.status == FILE_DEDUPE_RANGE_DIFFERS) {
+			fprintf(stderr, "welp, data differs\n");
+			break;
+		}
+
+		if (x.ri.status != FILE_DEDUPE_RANGE_SAME) {
+			fprintf(stderr, "FIDEDUPERANGE: %s\n",
+				strerror(-x.ri.status));
+			break;
+		}
+
+		if (x.ri.bytes_deduped == 0) {
+			fprintf(stderr, "welp, deduped zero bytes?\n");
+			break;
+		}
+
+		off += x.ri.bytes_deduped;
+	}
+}
+
 static int
 dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 {
@@ -294,7 +342,6 @@ dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 	while (an != NULL) {
 		struct hashref *dst;
 		off_t dstblock;
-		off_t off;
 
 		dst = iv_container_of(an, struct hashref, an);
 		an = iv_avl_tree_next(an);
@@ -330,47 +377,7 @@ dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 		posix_fadvise(dst->f->fd, dstblock * block_size,
 			      16 * block_size, POSIX_FADV_WILLNEED);
 
-		off = 0;
-		while (off < block_size) {
-			struct {
-				struct file_dedupe_range r;
-				struct file_dedupe_range_info ri;
-			} x;
-
-			x.r.src_offset = srcblock * block_size + off;
-			x.r.src_length = block_size - off;
-			x.r.dest_count = 1;
-			x.r.reserved1 = 0;
-			x.r.reserved2 = 0;
-			x.ri.dest_fd = dst->f->fd;
-			x.ri.dest_offset = dstblock * block_size + off;
-			x.ri.bytes_deduped = 0;
-			x.ri.status = 0;
-			x.ri.reserved = 0;
-
-			if (ioctl(src->f->fd, FIDEDUPERANGE, &x) < 0) {
-				perror("ioctl");
-				break;
-			}
-
-			if (x.ri.status == FILE_DEDUPE_RANGE_DIFFERS) {
-				fprintf(stderr, "welp, data differs\n");
-				break;
-			}
-
-			if (x.ri.status != FILE_DEDUPE_RANGE_SAME) {
-				fprintf(stderr, "FIDEDUPERANGE: %s\n",
-					strerror(-x.ri.status));
-				break;
-			}
-
-			if (x.ri.bytes_deduped == 0) {
-				fprintf(stderr, "welp, deduped zero bytes?\n");
-				break;
-			}
-
-			off += x.ri.bytes_deduped;
-		}
+		dedup_file_range(dst->f->fd, dstblock, src->f->fd, srcblock);
 	}
 
 	return count;
