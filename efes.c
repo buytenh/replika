@@ -815,13 +815,18 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 
 			pthread_rwlock_rdlock(&bg->lock);
 
-			ret = __make_dirty_for_writing(fh, block);
-			if (ret) {
-				pthread_rwlock_unlock(&bg->lock);
-				return ret;
+			if (__can_elide_write(fh, buf, totrim, offset)) {
+				ret = totrim;
+			} else {
+				ret = __make_dirty_for_writing(fh, block);
+				if (ret) {
+					pthread_rwlock_unlock(&bg->lock);
+					return ret;
+				}
+
+				ret = pwrite(fh->imgfd, buf, totrim, offset);
 			}
 
-			ret = pwrite(fh->imgfd, buf, totrim, offset);
 			if (ret < 0) {
 				ret = -errno;
 				pthread_rwlock_unlock(&bg->lock);
