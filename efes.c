@@ -69,7 +69,6 @@ struct efes_file_info
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
 
 static int block_size = 1048576;
-static int defrag_dirty_blocks;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
 static int trim_cipher_algo = GCRY_CIPHER_AES128;
@@ -610,8 +609,7 @@ static void *commit_thread(void *_me)
 					(long long)block);
 				memset(hash, 0, hash_size);
 			} else {
-				if (defrag_dirty_blocks)
-					xpwrite(fh->imgfd, buf, ret, off);
+				xpwrite(fh->imgfd, buf, ret, off);
 				gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 			}
 
@@ -872,7 +870,6 @@ static void usage(const char *progname)
 "         --help            print help\n"
 "    -V   --version         print version\n"
 "    -b   --block-size=x    hash block size\n"
-"         --defrag          defragment written blocks on image close\n"
 "    -h   --hash-algo=x     hash algorithm\n"
 "         --trim-cipher=x   trim fill cipher\n"
 "         --trim-key-file=x trim fill key file\n"
@@ -888,7 +885,6 @@ struct efes_param
 {
 	char	*backing_dir;
 	int	block_size;
-	int	defrag_dirty_blocks;
 	char	*hash_algo;
 	char	*trim_cipher;
 	char	*trim_key_file;
@@ -899,7 +895,6 @@ struct efes_param
 static struct fuse_opt efes_opts[] = {
 	EFES_OPT("-b %u",		block_size),
 	EFES_OPT("--block-size=%u",	block_size),
-	EFES_OPT("--defrag",		defrag_dirty_blocks),
 	EFES_OPT("-h %s",		hash_algo),
 	EFES_OPT("--hash-algo=%s",	hash_algo),
 	EFES_OPT("--trim-cipher=%s",	trim_cipher),
@@ -972,9 +967,6 @@ int main(int argc, char *argv[])
 		}
 		block_size = param.block_size;
 	}
-
-	if (param.defrag_dirty_blocks)
-		defrag_dirty_blocks = 1;
 
 	if (param.hash_algo != NULL) {
 		hash_algo = gcry_md_map_name(param.hash_algo);
