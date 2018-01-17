@@ -36,8 +36,8 @@
 #ifndef FIDEDUPERANGE
 #define FIDEDUPERANGE	_IOWR(0x94, 54, struct file_dedupe_range)
 
-#define FILE_DEDUPE_RANGE_SAME          0
-#define FILE_DEDUPE_RANGE_DIFFERS       1
+#define FILE_DEDUPE_RANGE_SAME		0
+#define FILE_DEDUPE_RANGE_DIFFERS	1
 
 struct file_dedupe_range_info {
 	int64_t		dest_fd;
