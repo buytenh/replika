@@ -83,6 +83,14 @@ struct file
 	struct hashref		refs[0];
 };
 
+struct dedup_op
+{
+	struct file		*dst;
+	off_t			dstblock;
+	struct file		*src;
+	off_t			srcblock;
+};
+
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
@@ -90,6 +98,9 @@ static int dry_run;
 static int verbose;
 static struct iv_list_head files;
 static struct iv_avl_tree block_hashes;
+static struct dedup_op *dedup_ops;
+static int dedup_ops_alloc;
+static int dedup_ops_used;
 
 static int compare_block_hashes(const struct iv_avl_node *_a,
 				const struct iv_avl_node *_b)
@@ -277,6 +288,86 @@ static void add_file(const char *imgfile, const char *mapfile, int index)
 	fclose(mapf);
 }
 
+static void queue_dedup_op(struct file *dst, off_t dstblock,
+			   struct file *src, off_t srcblock)
+{
+	struct dedup_op *op;
+
+	if (dedup_ops_alloc == dedup_ops_used) {
+		int toalloc;
+
+		if (dedup_ops_alloc)
+			toalloc = 2 * dedup_ops_alloc;
+		else
+			toalloc = 1024;
+
+		dedup_ops = realloc(dedup_ops, toalloc * sizeof(dedup_ops[0]));
+		if (dedup_ops == NULL)
+			abort();
+
+		dedup_ops_alloc = toalloc;
+	}
+
+	op = dedup_ops + dedup_ops_used;
+	op->dst = dst;
+	op->dstblock = dstblock;
+	op->src = src;
+	op->srcblock = srcblock;
+
+	dedup_ops_used++;
+}
+
+static void build_dedup_ops(void)
+{
+	struct iv_list_head *lh;
+
+	iv_list_for_each (lh, &files) {
+		struct file *f;
+		int i;
+
+		f = iv_container_of(lh, struct file, list);
+
+		for (i = 0; i < f->blocks; i++) {
+			struct iv_avl_node *min;
+			struct hashref *src;
+			off_t srcblock;
+			struct iv_avl_node *an;
+
+			min = iv_avl_tree_min(&f->refs[i].bh->refs);
+			if (min == NULL)
+				continue;
+
+			src = iv_container_of(min, struct hashref, an);
+			if (f != src->f)
+				continue;
+
+			srcblock = src - src->f->refs;
+
+			an = iv_avl_tree_next(min);
+			while (an != NULL) {
+				struct hashref *dst;
+				off_t dstblock;
+
+				dst = iv_container_of(an, struct hashref, an);
+				an = iv_avl_tree_next(an);
+
+				if (dst->f->readonly)
+					continue;
+
+				dstblock = dst - dst->f->refs;
+				if (extent_tree_diff(&src->f->extent_tree,
+						     srcblock * block_size,
+						     &dst->f->extent_tree,
+						     dstblock * block_size,
+						     block_size)) {
+					queue_dedup_op(dst->f, dstblock,
+						       src->f, srcblock);
+				}
+			}
+		}
+	}
+}
+
 static void
 dedup_file_range(int dstfd, off_t dstblock, int srcfd, off_t srcblock)
 {
@@ -384,35 +475,6 @@ dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
 	return count;
 }
 
-static int count_dedup_operations(void)
-{
-	int count;
-	struct iv_list_head *lh;
-
-	count = 0;
-	iv_list_for_each (lh, &files) {
-		struct file *f;
-		int i;
-
-		f = iv_container_of(lh, struct file, list);
-
-		for (i = 0; i < f->blocks; i++) {
-			struct iv_avl_node *min;
-
-			min = iv_avl_tree_min(&f->refs[i].bh->refs);
-			if (min == NULL)
-				continue;
-
-			if (f != iv_container_of(min, struct hashref, an)->f)
-				continue;
-
-			count += dedup_block_hash(min, 0, 0);
-		}
-	}
-
-	return count;
-}
-
 struct dedup_state
 {
 	struct file	*f;
@@ -487,16 +549,14 @@ static void *dedup_thread(void *_me)
 
 static void scandups(void)
 {
-	int count;
-
-	count = count_dedup_operations();
-	if (count) {
+	build_dedup_ops();
+	if (dedup_ops_used) {
 		struct dedup_state ds;
 
 		ds.f = iv_container_of(files.next, struct file, list);
 		ds.block = 0;
 		ds.dedup_index = 1;
-		ds.dedup_count = count;
+		ds.dedup_count = dedup_ops_used;
 		run_threads(dedup_thread, &ds);
 	}
 }
@@ -524,6 +584,8 @@ static void destroy(void)
 		iv_avl_tree_delete(&block_hashes, &bh->an);
 		free(bh);
 	}
+
+	free(dedup_ops);
 }
 
 int main(int argc, char *argv[])
