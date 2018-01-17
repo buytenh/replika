@@ -416,71 +416,9 @@ dedup_file_range(int dstfd, off_t dstblock, int srcfd, off_t srcblock)
 	}
 }
 
-static int
-dedup_block_hash(struct iv_avl_node *min, int dedup_index, int dedup_count)
-{
-	struct hashref *src;
-	off_t srcblock;
-	int count;
-	struct iv_avl_node *an;
-
-	src = iv_container_of(min, struct hashref, an);
-	srcblock = src - src->f->refs;
-
-	count = 0;
-
-	an = iv_avl_tree_next(min);
-	while (an != NULL) {
-		struct hashref *dst;
-		off_t dstblock;
-
-		dst = iv_container_of(an, struct hashref, an);
-		an = iv_avl_tree_next(an);
-
-		if (dst->f->readonly)
-			continue;
-
-		dstblock = dst - dst->f->refs;
-
-		if (!extent_tree_diff(&src->f->extent_tree,
-				      srcblock * block_size,
-				      &dst->f->extent_tree,
-				      dstblock * block_size, block_size)) {
-			continue;
-		}
-
-		if (dedup_count &&
-		    (dry_run || (verbose && should_report_progress()))) {
-			printf("[%d/%d] %s %Ld => %s %Ld\n",
-			       dedup_index, dedup_count,
-			       src->f->name, (long long)srcblock,
-			       dst->f->name, (long long)dstblock);
-		}
-
-		dedup_index++;
-		count++;
-
-		if (dry_run || dedup_count == 0)
-			continue;
-
-		posix_fadvise(src->f->fd, srcblock * block_size,
-			      16 * block_size, POSIX_FADV_WILLNEED);
-
-		posix_fadvise(dst->f->fd, dstblock * block_size,
-			      16 * block_size, POSIX_FADV_WILLNEED);
-
-		dedup_file_range(dst->f->fd, dstblock, src->f->fd, srcblock);
-	}
-
-	return count;
-}
-
 struct dedup_state
 {
-	struct file	*f;
-	off_t		block;
 	int		dedup_index;
-	int		dedup_count;
 };
 
 static void *dedup_thread(void *_me)
@@ -490,56 +428,34 @@ static void *dedup_thread(void *_me)
 
 	xsem_wait(&me->sem0);
 
-	while (1) {
-		struct file *f;
-		off_t block;
-		struct block_hash *bh;
-		struct iv_avl_node *an;
+	while (ds->dedup_index < dedup_ops_used) {
+		struct dedup_op *op;
 
-		f = ds->f;
-		if (f == NULL)
-			break;
+		op = dedup_ops + ds->dedup_index;
+		ds->dedup_index++;
 
-		block = ds->block;
-		if (block == 0 && (dry_run || verbose))
-			printf("deduping blocks from %s\n", f->name);
-
-		ds->block++;
-		if (ds->block == f->blocks) {
-			struct iv_list_head *lh;
-
-			lh = f->list.next;
-			if (lh != &files)
-				ds->f = iv_container_of(lh, struct file, list);
-			else
-				ds->f = NULL;
-
-			ds->block = 0;
+		if (dry_run || (verbose && should_report_progress())) {
+			printf("[%d/%d] %s %Ld => %s %Ld\n",
+			       ds->dedup_index, dedup_ops_used,
+			       op->src->name, (long long)op->srcblock,
+			       op->dst->name, (long long)op->dstblock);
 		}
 
-		bh = f->refs[block].bh;
+		if (dry_run)
+			continue;
 
-		an = iv_avl_tree_min(&bh->refs);
-		if (an != NULL) {
-			int count;
-			struct iv_avl_node *an2;
+		posix_fadvise(op->src->fd, op->srcblock * block_size,
+			      16 * block_size, POSIX_FADV_WILLNEED);
 
-			bh->refs.root = NULL;
+		posix_fadvise(op->dst->fd, op->dstblock * block_size,
+			      16 * block_size, POSIX_FADV_WILLNEED);
 
-			count = dedup_block_hash(an, 0, 0);
+		xsem_post(&me->next->sem0);
 
-			an2 = iv_avl_tree_next(an);
-			if (an2 != NULL) {
-				int index;
+		dedup_file_range(op->dst->fd, op->dstblock,
+				 op->src->fd, op->srcblock);
 
-				index = ds->dedup_index;
-				ds->dedup_index += count;
-
-				xsem_post(&me->next->sem0);
-				dedup_block_hash(an, index, ds->dedup_count);
-				xsem_wait(&me->sem0);
-			}
-		}
+		xsem_wait(&me->sem0);
 	}
 
 	xsem_post(&me->next->sem0);
@@ -553,10 +469,7 @@ static void scandups(void)
 	if (dedup_ops_used) {
 		struct dedup_state ds;
 
-		ds.f = iv_container_of(files.next, struct file, list);
-		ds.block = 0;
-		ds.dedup_index = 1;
-		ds.dedup_count = dedup_ops_used;
+		ds.dedup_index = 0;
 		run_threads(dedup_thread, &ds);
 	}
 }
