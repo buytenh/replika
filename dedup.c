@@ -20,18 +20,15 @@
 #define _FILE_OFFSET_BITS 64
 
 #include <stdio.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <gcrypt.h>
 #include <getopt.h>
-#include <iv_avl.h>
-#include <iv_list.h>
 #include <linux/fs.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include "common.h"
-#include "extents.h"
+#include "dedup.h"
 
 #ifndef FIDEDUPERANGE
 #define FIDEDUPERANGE	_IOWR(0x94, 54, struct file_dedupe_range)
@@ -57,236 +54,23 @@ struct file_dedupe_range {
 };
 #endif
 
-struct block_hash
-{
-	struct iv_avl_node	an;
-	struct iv_avl_tree	refs;
-	uint8_t			hash[0];
-};
-
-struct hashref
-{
-	struct iv_avl_node	an;
-	struct file		*f;
-	struct block_hash	*bh;
-};
-
-struct file
-{
-	struct iv_list_head	list;
-	int			readonly;
-	int			index;
-	const char		*name;
-	int			fd;
-	uint64_t		blocks;
-	struct iv_avl_tree	extent_tree;
-	struct hashref		refs[0];
-};
-
 struct dedup_op
 {
-	struct file		*dst;
-	off_t			dstblock;
-	struct file		*src;
-	off_t			srcblock;
+	struct file	*dst;
+	off_t		dstblock;
+	struct file	*src;
+	off_t		srcblock;
 };
 
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
-static int hash_size;
 static int dry_run;
 static int verbose;
-static struct iv_list_head files;
-static struct iv_avl_tree block_hashes;
+
 static struct dedup_op *dedup_ops;
 static int dedup_ops_alloc;
 static int dedup_ops_used;
-
-static int compare_block_hashes(const struct iv_avl_node *_a,
-				const struct iv_avl_node *_b)
-{
-	const struct block_hash *a = iv_container_of(_a, struct block_hash, an);
-	const struct block_hash *b = iv_container_of(_b, struct block_hash, an);
-
-	return memcmp(a->hash, b->hash, hash_size);
-}
-
-static struct block_hash *find_block_hash(uint8_t *hash)
-{
-	struct iv_avl_node *an;
-
-	an = block_hashes.root;
-	while (an != NULL) {
-		struct block_hash *bh;
-		int ret;
-
-		bh = iv_container_of(an, struct block_hash, an);
-
-		ret = memcmp(hash, bh->hash, hash_size);
-		if (ret == 0)
-			return bh;
-
-		if (ret < 0)
-			an = an->left;
-		else
-			an = an->right;
-	}
-
-	return NULL;
-}
-
-static int
-compare_hashrefs(const struct iv_avl_node *_a, const struct iv_avl_node *_b)
-{
-	const struct hashref *a = iv_container_of(_a, struct hashref, an);
-	const struct hashref *b = iv_container_of(_b, struct hashref, an);
-
-	if (a->f->readonly > b->f->readonly)
-		return -1;
-	if (a->f->readonly < b->f->readonly)
-		return 1;
-
-	if (a->f->index > b->f->index)
-		return -1;
-	if (a->f->index < b->f->index)
-		return 1;
-
-	if (a - a->f->refs < b - b->f->refs)
-		return -1;
-	if (a - a->f->refs > b - b->f->refs)
-		return 1;
-
-	return 0;
-}
-
-static struct block_hash *get_block_hash(uint8_t *hash)
-{
-	struct block_hash *bh;
-
-	bh = find_block_hash(hash);
-	if (bh == NULL) {
-		bh = malloc(sizeof(*bh) + hash_size);
-		if (bh == NULL)
-			abort();
-
-		INIT_IV_AVL_TREE(&bh->refs, compare_hashrefs);
-		memcpy(bh->hash, hash, hash_size);
-		iv_avl_tree_insert(&block_hashes, &bh->an);
-	}
-
-	return bh;
-}
-
-static void add_file(const char *imgfile, const char *mapfile, int index)
-{
-	int readonly;
-	int imgfd;
-	off_t imgsize;
-	off_t sizeblocks;
-	FILE *mapf;
-	off_t mapsize;
-	char mapbuf[1048576];
-	struct file *f;
-	uint8_t dirty_hash[hash_size];
-	off_t i;
-
-	if (verbose)
-		printf("scanning file %s\n", imgfile);
-
-	readonly = 0;
-
-	imgfd = open(imgfile, O_RDWR);
-	if (imgfd < 0 && (errno == EACCES || errno == EPERM)) {
-		readonly = 1;
-		imgfd = open(imgfile, O_RDONLY);
-	}
-
-	if (imgfd < 0) {
-		fprintf(stderr, "error opening %s: %s\n",
-			imgfile, strerror(errno));
-		exit(1);
-	}
-
-	imgsize = lseek(imgfd, 0, SEEK_END);
-	if (imgsize < 0) {
-		perror("lseek");
-		exit(1);
-	}
-
-	sizeblocks = (imgsize + block_size - 1) / block_size;
-	if (sizeblocks == 0) {
-		close(imgfd);
-		return;
-	}
-
-	mapf = fopen(mapfile, "r");
-	if (mapf == NULL) {
-		fprintf(stderr, "error opening %s: %s\n",
-			mapfile, strerror(errno));
-		exit(1);
-	}
-
-	if (fseeko(mapf, 0, SEEK_END) < 0) {
-		perror("fseeko");
-		exit(1);
-	}
-
-	mapsize = ftello(mapf);
-	if (mapsize != sizeblocks * hash_size) {
-		fprintf(stderr, "size of %s (%Ld) does not match size of "
-				"%s (%Ld)\n", imgfile, (long long)imgsize,
-			mapfile, (long long)mapsize);
-		exit(1);
-	}
-
-	if (fseeko(mapf, 0, SEEK_SET) < 0) {
-		perror("fseeko");
-		exit(1);
-	}
-
-	setbuffer(mapf, mapbuf, sizeof(mapbuf));
-
-	f = malloc(sizeof(*f) + sizeblocks * sizeof(struct hashref));
-	if (f == NULL)
-		abort();
-
-	iv_list_add(&f->list, &files);
-	f->readonly = readonly;
-	f->index = index;
-	f->name = imgfile;
-	f->fd = imgfd;
-	f->blocks = sizeblocks;
-
-	if (extent_tree_build(&f->extent_tree, imgfd) < 0) {
-		fprintf(stderr, "error building extent tree for %s\n", imgfile);
-		exit(1);
-	}
-
-	memset(dirty_hash, 0, sizeof(dirty_hash));
-
-	for (i = 0; i < sizeblocks; i++) {
-		uint8_t hash[hash_size];
-		struct block_hash *bh;
-		struct hashref *hr;
-
-		if (fread(hash, hash_size, 1, mapf) != 1) {
-			fprintf(stderr, "error reading from map file\n");
-			exit(1);
-		}
-
-		if (memcmp(hash, dirty_hash, hash_size) == 0)
-			continue;
-
-		bh = get_block_hash(hash);
-
-		hr = f->refs + i;
-		hr->f = f;
-		hr->bh = bh;
-		iv_avl_tree_insert(&bh->refs, &hr->an);
-	}
-
-	fclose(mapf);
-}
+static int dedup_index;
 
 static void queue_dedup_op(struct file *dst, off_t dstblock,
 			   struct file *src, off_t srcblock)
@@ -315,57 +99,6 @@ static void queue_dedup_op(struct file *dst, off_t dstblock,
 	op->srcblock = srcblock;
 
 	dedup_ops_used++;
-}
-
-static void build_dedup_ops(void)
-{
-	struct iv_list_head *lh;
-
-	iv_list_for_each (lh, &files) {
-		struct file *f;
-		int i;
-
-		f = iv_container_of(lh, struct file, list);
-
-		for (i = 0; i < f->blocks; i++) {
-			struct iv_avl_node *min;
-			struct hashref *src;
-			off_t srcblock;
-			struct iv_avl_node *an;
-
-			min = iv_avl_tree_min(&f->refs[i].bh->refs);
-			if (min == NULL)
-				continue;
-
-			src = iv_container_of(min, struct hashref, an);
-			if (f != src->f)
-				continue;
-
-			srcblock = src - src->f->refs;
-
-			an = iv_avl_tree_next(min);
-			while (an != NULL) {
-				struct hashref *dst;
-				off_t dstblock;
-
-				dst = iv_container_of(an, struct hashref, an);
-				an = iv_avl_tree_next(an);
-
-				if (dst->f->readonly)
-					continue;
-
-				dstblock = dst - dst->f->refs;
-				if (extent_tree_diff(&src->f->extent_tree,
-						     srcblock * block_size,
-						     &dst->f->extent_tree,
-						     dstblock * block_size,
-						     block_size)) {
-					queue_dedup_op(dst->f, dstblock,
-						       src->f, srcblock);
-				}
-			}
-		}
-	}
 }
 
 static void
@@ -416,27 +149,21 @@ dedup_file_range(int dstfd, off_t dstblock, int srcfd, off_t srcblock)
 	}
 }
 
-struct dedup_state
-{
-	int		dedup_index;
-};
-
 static void *dedup_thread(void *_me)
 {
 	struct worker_thread *me = _me;
-	struct dedup_state *ds = me->cookie;
 
 	xsem_wait(&me->sem0);
 
-	while (ds->dedup_index < dedup_ops_used) {
+	while (dedup_index < dedup_ops_used) {
 		struct dedup_op *op;
 
-		op = dedup_ops + ds->dedup_index;
-		ds->dedup_index++;
+		op = dedup_ops + dedup_index;
+		dedup_index++;
 
 		if (dry_run || (verbose && should_report_progress())) {
 			printf("[%d/%d] %s %Ld => %s %Ld\n",
-			       ds->dedup_index, dedup_ops_used,
+			       dedup_index, dedup_ops_used,
 			       op->src->name, (long long)op->srcblock,
 			       op->dst->name, (long long)op->dstblock);
 		}
@@ -461,44 +188,6 @@ static void *dedup_thread(void *_me)
 	xsem_post(&me->next->sem0);
 
 	return NULL;
-}
-
-static void scandups(void)
-{
-	build_dedup_ops();
-	if (dedup_ops_used) {
-		struct dedup_state ds;
-
-		ds.dedup_index = 0;
-		run_threads(dedup_thread, &ds);
-	}
-}
-
-static void destroy(void)
-{
-	struct iv_list_head *lh;
-	struct iv_list_head *lh2;
-	struct iv_avl_node *an;
-	struct iv_avl_node *an2;
-
-	iv_list_for_each_safe (lh, lh2, &files) {
-		struct file *f;
-
-		f = iv_container_of(lh, struct file, list);
-		iv_list_del(&f->list);
-		extent_tree_free(&f->extent_tree);
-		free(f);
-	}
-
-	iv_avl_tree_for_each_safe (an, an2, &block_hashes) {
-		struct block_hash *bh;
-
-		bh = iv_container_of(an, struct block_hash, an);
-		iv_avl_tree_delete(&block_hashes, &bh->an);
-		free(bh);
-	}
-
-	free(dedup_ops);
 }
 
 int main(int argc, char *argv[])
@@ -580,17 +269,25 @@ int main(int argc, char *argv[])
 
 	num /= 2;
 
-	INIT_IV_LIST_HEAD(&files);
-	INIT_IV_AVL_TREE(&block_hashes, compare_block_hashes);
+	dedup_scan_init(block_size, gcry_md_get_algo_dlen(hash_algo));
 
-	hash_size = gcry_md_get_algo_dlen(hash_algo);
+	for (i = 0; i < num; i++) {
+		const char *imgfile = argv[optind + 2 * i];
+		const char *mapfile = argv[optind + 2 * i + 1];
 
-	for (i = 0; i < num; i++)
-		add_file(argv[optind + 2 * i], argv[optind + 2 * i + 1], i);
+		if (verbose)
+			printf("scanning file %s\n", imgfile);
+		dedup_scan_file(imgfile, mapfile, i);
+	}
 
-	scandups();
+	dedup_scan_ops(queue_dedup_op);
 
-	destroy();
+	if (dedup_ops_used) {
+		run_threads(dedup_thread, NULL);
+		free(dedup_ops);
+	}
+
+	dedup_scan_deinit();
 
 	return 0;
 }
