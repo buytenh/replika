@@ -65,6 +65,7 @@ struct dedup_op
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
 static int dry_run;
+static int readahead = 16;
 static int verbose;
 
 static struct dedup_op *dedup_ops;
@@ -149,6 +150,12 @@ dedup_file_range(int dstfd, off_t dstblock, int srcfd, off_t srcblock)
 	}
 }
 
+static void do_readahead(struct file *f, off_t block)
+{
+	posix_fadvise(f->fd, block * block_size,
+		      block_size, POSIX_FADV_WILLNEED);
+}
+
 static void *dedup_thread(void *_me)
 {
 	struct worker_thread *me = _me;
@@ -192,11 +199,20 @@ static void *dedup_thread(void *_me)
 		if (dry_run)
 			continue;
 
-		posix_fadvise(op->src->fd, op->srcblock * block_size,
-			      16 * block_size, POSIX_FADV_WILLNEED);
+		if (readahead && (index % (readahead / 2)) == 0) {
+			int toreadahead;
+			int i;
 
-		posix_fadvise(op->dst->fd, op->dstblock * block_size,
-			      16 * block_size, POSIX_FADV_WILLNEED);
+			toreadahead = readahead;
+			if (index + toreadahead > dedup_ops_used)
+				toreadahead = dedup_ops_used - index;
+
+			for (i = 0; i < toreadahead; i++)
+				do_readahead(op[i].src, op[i].srcblock);
+
+			for (i = 0; i < toreadahead; i++)
+				do_readahead(op[i].dst, op[i].dstblock);
+		}
 
 		xsem_post(&me->next->sem0);
 
@@ -218,6 +234,7 @@ int main(int argc, char *argv[])
 		{ "dry-run", no_argument, 0, 'd' },
 		{ "hash-algo", required_argument, 0, 'h' },
 		{ "hash-algorithm", required_argument, 0, 'h' },
+		{ "readahead", required_argument, 0, 'r' },
 		{ "verbose", no_argument, 0, 'v' },
 		{ 0, 0, 0, 0 },
 	};
@@ -232,7 +249,7 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 
-		c = getopt_long(argc, argv, "b:h:", long_options, NULL);
+		c = getopt_long(argc, argv, "b:h:r:", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -266,6 +283,21 @@ int main(int argc, char *argv[])
 
 			break;
 
+		case 'r':
+			if (sscanf(optarg, "%i", &readahead) != 1) {
+				fprintf(stderr, "cannot parse readahead: "
+						"%s\n", optarg);
+				return 1;
+			}
+
+			if (readahead < 0 || readahead > 1024) {
+				fprintf(stderr, "error: readahead must be "
+						"in [0..1024]\n");
+				return 1;
+			}
+
+			break;
+
 		case 'v':
 			verbose = 1;
 			break;
@@ -284,6 +316,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, " -b, --block-size=SIZE    hash block size\n");
 		fprintf(stderr, " -d, --dry-run            don't dedup\n");
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
+		fprintf(stderr, " -r, --readahead=NUM      do readahead\n");
 		fprintf(stderr, " -v, --verbose            more output\n");
 		return 1;
 	}
