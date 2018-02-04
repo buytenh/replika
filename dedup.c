@@ -165,30 +165,28 @@ static void *dedup_thread(void *_me)
 	while (dedup_index < dedup_ops_used) {
 		int index;
 		struct dedup_op *op;
-		int print_srcdst;
+		int print_src;
 
 		index = dedup_index++;
 		op = dedup_ops + index;
 
-		print_srcdst = 0;
+		print_src = 0;
 		if (dry_run) {
-			print_srcdst = 1;
+			print_src = 1;
 		} else if (verbose) {
 			if (!index) {
-				print_srcdst = 1;
-			} else if (op[-1].dst != op[0].dst) {
-				print_srcdst = 1;
+				print_src = 1;
 			} else if (op[-1].src != op[0].src) {
-				print_srcdst = 1;
+				print_src = 1;
 			}
 		}
 
-		if (print_srcdst) {
-			printf("%s => %s\n", op->src->name, op->dst->name);
+		if (print_src) {
+			printf("%s =>\n", op->src->name);
 			progress_reported();
 		}
 
-		if (print_srcdst || dry_run ||
+		if (print_src || dry_run ||
 		    (verbose && should_report_progress())) {
 			printf("[%d/%d] %s %Ld => %s %Ld\n",
 			       dedup_index, dedup_ops_used,
