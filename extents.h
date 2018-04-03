@@ -28,8 +28,5 @@ int extent_tree_diff(struct iv_avl_tree *a, uint64_t aoff,
 		     struct iv_avl_tree *b, uint64_t boff, uint64_t length);
 void extent_tree_free(struct iv_avl_tree *extents);
 
-int compare_file_mappings(uint8_t *dst, int a, int b,
-			  uint64_t num_blocks, uint64_t block_size);
-
 
 #endif

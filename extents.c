@@ -231,36 +231,3 @@ void extent_tree_free(struct iv_avl_tree *extents)
 	if (extents->root != NULL)
 		__free_element(extents->root);
 }
-
-int compare_file_mappings(uint8_t *dst, int a, int b,
-			  uint64_t num_blocks, uint64_t block_size)
-{
-	int ret;
-	struct iv_avl_tree aext;
-	struct iv_avl_tree bext;
-	uint64_t i;
-
-	ret = 0;
-
-	if (extent_tree_build(&aext, a) < 0) {
-		ret = -1;
-		goto out_free_a;
-	}
-
-	if (extent_tree_build(&bext, b) < 0) {
-		ret = -1;
-		goto out;
-	}
-
-	for (i = 0; i < num_blocks; i++) {
-		off_t off = i * block_size;
-		dst[i] = extent_tree_diff(&aext, off, &bext, off, block_size);
-	}
-
-out:
-	extent_tree_free(&bext);
-out_free_a:
-	extent_tree_free(&aext);
-
-	return ret;
-}
