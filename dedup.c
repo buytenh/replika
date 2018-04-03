@@ -247,7 +247,7 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 
-		c = getopt_long(argc, argv, "b:h:r:", long_options, NULL);
+		c = getopt_long(argc, argv, "b:dh:r:v", long_options, NULL);
 		if (c == -1)
 			break;
 
