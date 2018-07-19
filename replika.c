@@ -44,6 +44,8 @@ static int freeze_fd[MAX_FREEZE];
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
+static int cow_friendly;
+
 static int fd_src;
 static off_t sizeblocks;
 static uint8_t *srchashmap;
@@ -106,6 +108,41 @@ static int check_signal(void)
 	return signal_quit_flag;
 }
 
+static void xpwrite_cowcheck(int fd, const void *buf,
+			     size_t count, off_t offset)
+{
+	uint8_t *readbuf;
+	ssize_t i;
+
+	if (!cow_friendly || count > 4194304) {
+		xpwrite(fd, buf, count, offset);
+		return;
+	}
+
+	readbuf = alloca(count);
+
+	i = xpread(fd, readbuf, count, offset);
+	if (i != count) {
+		fprintf(stderr, "xpwrite_cowcheck: read %Ld bytes "
+				"from offset %Ld where %Ld expected\n",
+			(long long)i, (long long)offset,
+			(long long)count);
+		xpwrite(fd, buf, count, offset);
+		return;
+	}
+
+	for (i = 0; i < count; i += 4096) {
+		int len;
+
+		len = count - i;
+		if (len > 4096)
+			len = 4096;
+
+		if (memcmp(buf + i, readbuf + i, len))
+			xpwrite(fd, buf + i, len, offset + i);
+	}
+}
+
 static void *copy_thread_no_hashmap(void *_me)
 {
 	struct worker_thread *me = _me;
@@ -150,10 +187,10 @@ static void *copy_thread_no_hashmap(void *_me)
 		xsem_wait(&me->sem1);
 
 		if (memcmp(dsthashmap + off * hash_size, hash, hash_size)) {
-			xpwrite(fd_dst, buf, ret, off * block_size);
+			xpwrite_cowcheck(fd_dst, buf, ret, off * block_size);
+			memcpy(dsthashmap + off * hash_size, hash, hash_size);
 			xpwrite(fd_dsthashmap, hash,
 				hash_size, off * hash_size);
-			memcpy(dsthashmap + off * hash_size, hash, hash_size);
 
 			fprintf(stderr, "%Ld ", (long long)off);
 			progress_reported();
@@ -239,7 +276,7 @@ static void *copy_thread_hashmap(void *_me)
 
 		xsem_wait(&me->sem1);
 
-		xpwrite(fd_dst, buf, ret, off * block_size);
+		xpwrite_cowcheck(fd_dst, buf, ret, off * block_size);
 
 		memcpy(dsthashmap + off * hash_size, hash, hash_size);
 		xpwrite(fd_dsthashmap, hash, hash_size, off * hash_size);
@@ -254,6 +291,7 @@ int main(int argc, char *argv[])
 {
 	static struct option long_options[] = {
 		{ "block-size", required_argument, 0, 'b' },
+		{ "cow-friendly", no_argument, 0, 'c' },
 		{ "hash-algo", required_argument, 0, 'h' },
 		{ "hash-algorithm", required_argument, 0, 'h' },
 		{ "max-iter", required_argument, 0, 'i' },
@@ -274,7 +312,7 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 
-		c = getopt_long(argc, argv, "b:h:i:f:l", long_options, NULL);
+		c = getopt_long(argc, argv, "b:ch:i:f:l", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -292,6 +330,10 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 
+			break;
+
+		case 'c':
+			cow_friendly = 1;
 			break;
 
 		case 'h':
@@ -339,6 +381,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s: [opts] <src> <srchashmap> <dst> "
 				"<dsthashmap>\n", argv[0]);
 		fprintf(stderr, " -b, --block-size=SIZE    hash block size\n");
+		fprintf(stderr, " -c, --cow-friendly       try to avoid "
+				"breaking cow in dst\n");
 		fprintf(stderr, " -f, --freeze=MOUNTPOINT  freeze "
 				"filesystem\n");
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
