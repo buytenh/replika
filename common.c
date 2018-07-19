@@ -89,7 +89,7 @@ ssize_t xpread(int fd, void *buf, size_t count, off_t offset)
 	return processed;
 }
 
-ssize_t xpwrite(int fd, const void *buf, size_t count, off_t offset)
+void xpwrite(int fd, const void *buf, size_t count, off_t offset)
 {
 	off_t processed;
 
@@ -111,8 +111,6 @@ ssize_t xpwrite(int fd, const void *buf, size_t count, off_t offset)
 
 		processed += ret;
 	}
-
-	return processed;
 }
 
 static void xsem_init(sem_t *sem, int pshared, unsigned int value)
