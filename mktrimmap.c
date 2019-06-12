@@ -295,10 +295,8 @@ int main(int argc, char *argv[])
 	run_threads(mktrimmap_thread, NULL);
 	fprintf(stderr, "done               \n");
 
-	fprintf(stderr, "flushing buffers... ");
 	close(fd_src);
 	close(fd_trimmap);
-	fprintf(stderr, "done\n");
 
 	return 0;
 }
