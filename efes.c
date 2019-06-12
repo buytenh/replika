@@ -1,6 +1,6 @@
 /*
  * replika, a set of tools for dealing with hashmapped disk images
- * Copyright (C) 2017, 2018 Lennert Buytenhek
+ * Copyright (C) 2017, 2018, 2019 Lennert Buytenhek
  *
  * This library is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version
@@ -26,7 +26,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -45,7 +44,6 @@
 enum {
 	BLOCK_STATE_CLEAN,
 	BLOCK_STATE_DIRTY,
-	BLOCK_STATE_DIRTY_TRIMMED,
 };
 
 #define BG_SIZE		8
@@ -71,15 +69,9 @@ GCRY_THREAD_OPTION_PTHREAD_IMPL;
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
-static int trim_cipher_algo = GCRY_CIPHER_AES128;
-static int trim_key_size;
 
 static int backing_dir_fd;
 static pthread_mutex_t readdir_lock;
-static pthread_key_t gcrypt_cipher_handle;
-static pthread_mutex_t gcrypt_lock;
-static int trim_fill;
-static uint8_t trim_key[64];
 
 static int efes_getattr(const char *path, struct stat *buf)
 {
@@ -241,212 +233,20 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
-static gcry_cipher_hd_t get_cipher_handle(void)
-{
-	gcry_cipher_hd_t hd;
-
-	hd = pthread_getspecific(gcrypt_cipher_handle);
-	if (hd != NULL)
-		return hd;
-
-	/*
-	 * libgcrypt 1.6.3 segfaults if gcry_cipher_open() calls
-	 * are not strictly serialised.
-	 */
-	pthread_mutex_lock(&gcrypt_lock);
-
-	if (gcry_cipher_open(&hd, trim_cipher_algo, GCRY_CIPHER_MODE_ECB, 0)) {
-		fprintf(stderr, "get_cipher_handle: error opening cipher\n");
-		abort();
-	}
-
-	if (gcry_cipher_setkey(hd, trim_key, trim_key_size)) {
-		fprintf(stderr, "get_cipher_handle: error setting key\n");
-		abort();
-	}
-
-	pthread_mutex_unlock(&gcrypt_lock);
-
-	pthread_setspecific(gcrypt_cipher_handle, hd);
-
-	return hd;
-}
-
-static void close_cipher_handle(void *_hd)
-{
-	gcry_cipher_hd_t hd = _hd;
-
-	gcry_cipher_close(hd);
-}
-
-static int
-__flush_trim_block(struct efes_file_info *fh, off_t block, int make_clean)
-{
-	struct block_group *bg = &fh->bg[block / BG_SIZE];
-	int bgoff = block % BG_SIZE;
-	gcry_cipher_hd_t hd;
-	off_t offset;
-	uint8_t buf[block_size];
-	uint32_t *ptr;
-	uint64_t ctr;
-	int i;
-	uint8_t hash[hash_size];
-	off_t hash_off;
-	uint8_t disk_hash[hash_size];
-	uint8_t dirty_hash[hash_size];
-
-	if (bg->state[bgoff] != BLOCK_STATE_DIRTY_TRIMMED)
-		abort();
-
-	hd = get_cipher_handle();
-
-	offset = block * block_size;
-
-	ptr = (uint32_t *)buf;
-	ctr = offset / 8;
-
-	for (i = 0; i < block_size; i += 8) {
-		*ptr++ = htonl(ctr >> 32);
-		*ptr++ = htonl(ctr & 0xffffffff);
-		ctr++;
-	}
-
-	if (gcry_cipher_encrypt(hd, buf, block_size, buf, block_size)) {
-		fprintf(stderr, "write_trim_block: error encrypting block\n");
-		return -EIO;
-	}
-
-	gcry_md_hash_buffer(hash_algo, hash, buf, block_size);
-
-	hash_off = block * hash_size;
-	if (xpread(fh->mapfd, disk_hash, hash_size, hash_off) < hash_size)
-		memset(disk_hash, 0xff, hash_size);
-
-	memset(dirty_hash, 0, hash_size);
-
-	if (memcmp(hash, disk_hash, hash_size)) {
-		if (memcmp(disk_hash, dirty_hash, hash_size))
-			xpwrite(fh->mapfd, dirty_hash, hash_size, hash_off);
-
-		xpwrite(fh->imgfd, buf, block_size, offset);
-
-		if (make_clean)
-			xpwrite(fh->mapfd, hash, hash_size, hash_off);
-	} else if (!make_clean) {
-		xpwrite(fh->mapfd, dirty_hash, hash_size, hash_off);
-	}
-
-	bg->state[bgoff] = make_clean ? BLOCK_STATE_CLEAN : BLOCK_STATE_DIRTY;
-
-	return 0;
-}
-
-static int __flush_trim_for_reading(struct efes_file_info *fh, off_t block)
-{
-	struct block_group *bg = &fh->bg[block / BG_SIZE];
-	int bgoff = block % BG_SIZE;
-	int ret;
-
-	ret = 0;
-	while (ret == 0 && bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED) {
-		pthread_rwlock_unlock(&bg->lock);
-
-		pthread_rwlock_wrlock(&bg->lock);
-		if (bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED)
-			ret = __flush_trim_block(fh, block, 1);
-		pthread_rwlock_unlock(&bg->lock);
-
-		pthread_rwlock_rdlock(&bg->lock);
-	}
-
-	return ret;
-}
-
 static int efes_read(const char *path, char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
-	off_t processed;
 
-	if (!fh->writable)
-		return pread(fh->imgfd, buf, size, offset);
-
-	processed = 0;
-	while (processed < size) {
-		size_t toread;
-		off_t block;
-		struct block_group *bg;
-		int ret;
-
-		if (offset >= fh->file_size)
-			break;
-
-		toread = size - processed;
-		if (offset + toread > fh->file_size)
-			toread = fh->file_size - offset;
-		if (toread > block_size - (offset % block_size))
-			toread = block_size - (offset % block_size);
-
-		block = offset / block_size;
-		bg = &fh->bg[block / BG_SIZE];
-
-		pthread_rwlock_rdlock(&bg->lock);
-
-		ret = __flush_trim_for_reading(fh, block);
-		if (ret) {
-			pthread_rwlock_unlock(&bg->lock);
-			return ret;
-		}
-
-		ret = pread(fh->imgfd, buf, toread, offset);
-
-		pthread_rwlock_unlock(&bg->lock);
-
-		if (ret < 0)
-			return processed ? processed : -errno;
-
-		buf += ret;
-		offset += ret;
-
-		processed += ret;
-	}
-
-	return processed;
+	return pread(fh->imgfd, buf, size, offset);
 }
 
-static int __can_elide_write(struct efes_file_info *fh, const void *buf,
-			     size_t count, off_t offset)
-{
-	off_t block;
-	struct block_group *bg;
-	int bgoff;
-	uint8_t vbuf[count];
-
-	block = offset / block_size;
-
-	bg = &fh->bg[block / BG_SIZE];
-	bgoff = block % BG_SIZE;
-
-	if (bg->state[bgoff] != BLOCK_STATE_CLEAN)
-		return 0;
-
-	if (xpread(fh->imgfd, vbuf, count, offset) < count)
-		return 0;
-
-	if (memcmp(buf, vbuf, count))
-		return 0;
-
-	return 1;
-}
-
-static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
+static void __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 {
 	struct block_group *bg = &fh->bg[block / BG_SIZE];
 	int bgoff = block % BG_SIZE;
-	int ret;
 
-	ret = 0;
-	while (ret == 0 && bg->state[bgoff] != BLOCK_STATE_DIRTY) {
+	while (bg->state[bgoff] != BLOCK_STATE_DIRTY) {
 		pthread_rwlock_unlock(&bg->lock);
 
 		pthread_rwlock_wrlock(&bg->lock);
@@ -457,15 +257,11 @@ static int __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
 			bg->state[bgoff] = BLOCK_STATE_DIRTY;
-		} else if (bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED) {
-			ret = __flush_trim_block(fh, block, 0);
 		}
 		pthread_rwlock_unlock(&bg->lock);
 
 		pthread_rwlock_rdlock(&bg->lock);
 	}
-
-	return ret;
 }
 
 static int efes_write(const char *path, const char *buf, size_t size,
@@ -504,17 +300,9 @@ static int efes_write(const char *path, const char *buf, size_t size,
 
 		pthread_rwlock_rdlock(&bg->lock);
 
-		if (__can_elide_write(fh, buf, towrite, offset)) {
-			ret = towrite;
-		} else {
-			ret = __make_dirty_for_writing(fh, block);
-			if (ret) {
-				pthread_rwlock_unlock(&bg->lock);
-				return ret;
-			}
+		__make_dirty_for_writing(fh, block);
 
-			ret = pwrite(fh->imgfd, buf, towrite, offset);
-		}
+		ret = pwrite(fh->imgfd, buf, towrite, offset);
 
 		pthread_rwlock_unlock(&bg->lock);
 
@@ -564,6 +352,7 @@ static void *commit_thread(void *_me)
 		off_t block;
 		struct block_group *bg;
 		int bgoff;
+		off_t off;
 		uint8_t buf[block_size];
 		int ret;
 		uint8_t hash[hash_size];
@@ -598,25 +387,20 @@ static void *commit_thread(void *_me)
 
 		xsem_post(&me->next->sem0);
 
-		if (bg->state[bgoff] == BLOCK_STATE_DIRTY) {
-			off_t off = block * block_size;
+		off = block * block_size;
 
-			ret = xpread(fh->imgfd, buf, block_size, off);
-			if ((ret < block_size && block != fh->numblocks - 1) ||
-			    (ret <= 0 && block == fh->numblocks - 1)) {
-				fprintf(stderr, "commit_thread: short "
-						"read on block %Ld\n",
-					(long long)block);
-				memset(hash, 0, hash_size);
-			} else {
-				xpwrite(fh->imgfd, buf, ret, off);
-				gcry_md_hash_buffer(hash_algo, hash, buf, ret);
-			}
-
-			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-		} else if (bg->state[bgoff] == BLOCK_STATE_DIRTY_TRIMMED) {
-			ret = __flush_trim_block(fh, block, 1);
+		ret = xpread(fh->imgfd, buf, block_size, off);
+		if ((ret < block_size && block != fh->numblocks - 1) ||
+		    (ret <= 0 && block == fh->numblocks - 1)) {
+			fprintf(stderr, "commit_thread: short read on "
+					"block %Ld\n", (long long)block);
+			memset(hash, 0, hash_size);
+		} else {
+			xpwrite(fh->imgfd, buf, ret, off);
+			gcry_md_hash_buffer(hash_algo, hash, buf, ret);
 		}
+
+		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 	}
 
 	return NULL;
@@ -754,9 +538,6 @@ out:
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
-	struct efes_file_info *fh = (void *)fi->fh;
-	gcry_cipher_hd_t hd;
-
 	if (!(mode & FALLOC_FL_PUNCH_HOLE))
 		return -EINVAL;
 
@@ -766,83 +547,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 		return -EINVAL;
 	if (len < 512)
 		return -EINVAL;
-
-	if (!trim_fill)
-		return 0;
-
-	hd = get_cipher_handle();
-
-	while (len) {
-		size_t totrim;
-		off_t block;
-		struct block_group *bg;
-		int ret;
-
-		if (offset >= fh->file_size)
-			break;
-
-		totrim = len;
-		if (offset + totrim > fh->file_size)
-			totrim = fh->file_size - offset;
-		if (totrim > block_size - (offset % block_size))
-			totrim = block_size - (offset % block_size);
-
-		block = offset / block_size;
-		bg = &fh->bg[block / BG_SIZE];
-
-		if (totrim < block_size) {
-			uint8_t buf[block_size];
-			uint32_t *ptr;
-			uint64_t ctr;
-			int i;
-
-			ptr = (uint32_t *)buf;
-			ctr = offset / 8;
-
-			for (i = 0; i < totrim; i += 8) {
-				*ptr++ = htonl(ctr >> 32);
-				*ptr++ = htonl(ctr & 0xffffffff);
-				ctr++;
-			}
-
-			if (gcry_cipher_encrypt(hd, buf, totrim, buf, totrim)) {
-				fprintf(stderr, "efes_fallocate: error "
-						"encrypting block\n");
-				return -EIO;
-			}
-
-			pthread_rwlock_rdlock(&bg->lock);
-
-			if (__can_elide_write(fh, buf, totrim, offset)) {
-				ret = totrim;
-			} else {
-				ret = __make_dirty_for_writing(fh, block);
-				if (ret) {
-					pthread_rwlock_unlock(&bg->lock);
-					return ret;
-				}
-
-				ret = pwrite(fh->imgfd, buf, totrim, offset);
-			}
-
-			if (ret < 0) {
-				ret = -errno;
-				pthread_rwlock_unlock(&bg->lock);
-				return ret;
-			}
-
-			pthread_rwlock_unlock(&bg->lock);
-		} else {
-			pthread_rwlock_wrlock(&bg->lock);
-			bg->state[block % BG_SIZE] = BLOCK_STATE_DIRTY_TRIMMED;
-			pthread_rwlock_unlock(&bg->lock);
-
-			ret = block_size;
-		}
-
-		offset += ret;
-		len -= ret;
-	}
 
 	return 0;
 }
@@ -871,8 +575,6 @@ static void usage(const char *progname)
 "    -V   --version         print version\n"
 "    -b   --block-size=x    hash block size\n"
 "    -h   --hash-algo=x     hash algorithm\n"
-"         --trim-cipher=x   trim fill cipher\n"
-"         --trim-key-file=x trim fill key file\n"
 "\n", progname);
 }
 
@@ -886,8 +588,6 @@ struct efes_param
 	char	*backing_dir;
 	int	block_size;
 	char	*hash_algo;
-	char	*trim_cipher;
-	char	*trim_key_file;
 };
 
 #define EFES_OPT(t, o)	{ t, offsetof(struct efes_param, o), -1, }
@@ -897,8 +597,6 @@ static struct fuse_opt efes_opts[] = {
 	EFES_OPT("--block-size=%u",	block_size),
 	EFES_OPT("-h %s",		hash_algo),
 	EFES_OPT("--hash-algo=%s",	hash_algo),
-	EFES_OPT("--trim-cipher=%s",	trim_cipher),
-	EFES_OPT("--trim-key-file=%s",	trim_key_file),
 	FUSE_OPT_KEY("--help",		KEY_HELP),
 	FUSE_OPT_KEY("-V",		KEY_VERSION),
 	FUSE_OPT_KEY("--version",	KEY_VERSION),
@@ -978,16 +676,6 @@ int main(int argc, char *argv[])
 	}
 	hash_size = gcry_md_get_algo_dlen(hash_algo);
 
-	if (param.trim_cipher != NULL) {
-		trim_cipher_algo = gcry_cipher_map_name(param.trim_cipher);
-		if (trim_cipher_algo == 0) {
-			fprintf(stderr, "unknown cipher algorithm "
-					"name: %s\n", param.trim_cipher);
-			return 1;
-		}
-	}
-	trim_key_size = gcry_cipher_get_algo_keylen(trim_cipher_algo);
-
 	backing_dir_fd = open(param.backing_dir, O_RDONLY | O_DIRECTORY);
 	if (backing_dir_fd < 0) {
 		perror("open");
@@ -996,50 +684,12 @@ int main(int argc, char *argv[])
 
 	pthread_mutex_init(&readdir_lock, NULL);
 
-	ret = pthread_key_create(&gcrypt_cipher_handle, close_cipher_handle);
-	if (ret) {
-		fprintf(stderr, "pthread_key_create: %s\n", strerror(-ret));
-		return 1;
-	}
-
-	pthread_mutex_init(&gcrypt_lock, NULL);
-
-	if (param.trim_key_file != NULL) {
-		int fd;
-		int ret;
-
-		trim_fill = 1;
-
-		fd = open(param.trim_key_file, O_RDONLY);
-		if (fd < 0) {
-			fprintf(stderr, "cannot open trim key file %s: %s\n",
-				param.trim_key_file, strerror(errno));
-			return 1;
-		}
-
-		ret = read(fd, trim_key, trim_key_size);
-		if (ret != trim_key_size) {
-			fprintf(stderr, "cannot read trim key file: "
-					"read %d bytes, wanted %d\n",
-				ret, trim_key_size);
-			return 1;
-		}
-
-		close(fd);
-	}
-
 	ret = fuse_main(args.argc, args.argv, &efes_oper, NULL);
-
-	memset(trim_key, 0, sizeof(trim_key));
 
 	fuse_opt_free_args(&args);
 	free(param.backing_dir);
 	if (param.hash_algo != NULL)
 		free(param.hash_algo);
-	if (param.trim_cipher != NULL)
-		free(param.trim_cipher);
-	if (param.trim_key_file != NULL)
-		free(param.trim_key_file);
 
 	return ret;
 }
