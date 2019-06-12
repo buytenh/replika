@@ -37,21 +37,17 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <values.h>
 #include "common.h"
 
 #define DIV_ROUND_UP(x, y)	(((x) + (y) - 1) / (y))
 
-enum {
-	BLOCK_STATE_CLEAN,
-	BLOCK_STATE_DIRTY,
-};
-
-#define BG_SIZE		8
+#define BG_SIZE		64
 
 struct block_group
 {
 	pthread_rwlock_t	lock;
-	uint8_t			state[BG_SIZE];
+	uint8_t			dirty[BG_SIZE / BITSPERBYTE];
 };
 
 struct efes_file_info
@@ -102,22 +98,30 @@ static void dirty_set(struct efes_file_info *fh, uint64_t block)
 {
 	struct block_group *bg;
 	unsigned int bgoff;
+	unsigned int bgbyte;
+	unsigned int bgmask;
 
 	bg = &fh->bg[block / BG_SIZE];
 	bgoff = block % BG_SIZE;
+	bgbyte = bgoff / BITSPERBYTE;
+	bgmask = 1 << (bgoff % BITSPERBYTE);
 
-	bg->state[bgoff] = BLOCK_STATE_DIRTY;
+	bg->dirty[bgbyte] |= bgmask;
 }
 
 static void dirty_clear(struct efes_file_info *fh, uint64_t block)
 {
 	struct block_group *bg;
 	unsigned int bgoff;
+	unsigned int bgbyte;
+	unsigned int bgmask;
 
 	bg = &fh->bg[block / BG_SIZE];
 	bgoff = block % BG_SIZE;
+	bgbyte = bgoff / BITSPERBYTE;
+	bgmask = 1 << (bgoff % BITSPERBYTE);
 
-	bg->state[bgoff] = BLOCK_STATE_CLEAN;
+	bg->dirty[bgbyte] &= ~bgmask;
 }
 
 static int efes_open(const char *path, struct fuse_file_info *fi)
@@ -257,11 +261,15 @@ static int dirty_test(struct efes_file_info *fh, uint64_t block)
 {
 	struct block_group *bg;
 	unsigned int bgoff;
+	unsigned int bgbyte;
+	unsigned int bgmask;
 
 	bg = &fh->bg[block / BG_SIZE];
 	bgoff = block % BG_SIZE;
+	bgbyte = bgoff / BITSPERBYTE;
+	bgmask = 1 << (bgoff % BITSPERBYTE);
 
-	return bg->state[bgoff] == BLOCK_STATE_DIRTY;
+	return !!(bg->dirty[bgbyte] & bgmask);
 }
 
 static void make_dirty_for_writing(struct efes_file_info *fh, off_t block)
