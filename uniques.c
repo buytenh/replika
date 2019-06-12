@@ -98,6 +98,8 @@ static void scan(FILE *fp)
 
 int main(int argc, char *argv[])
 {
+	char buf[1048576];
+
 	if (argc < 2) {
 		fprintf(stderr, "syntax: %s <key_size> [mapfile]*\n", argv[0]);
 		exit(EXIT_FAILURE);
@@ -111,6 +113,7 @@ int main(int argc, char *argv[])
 	INIT_IV_AVL_TREE(&keys, compare_keys);
 
 	if (argc == 2) {
+		setbuffer(stdin, buf, sizeof(buf));
 		scan(stdin);
 	} else {
 		int i;
@@ -124,7 +127,9 @@ int main(int argc, char *argv[])
 				continue;
 			}
 
+			setbuffer(fp, buf, sizeof(buf));
 			scan(fp);
+
 			fclose(fp);
 		}
 	}
