@@ -22,7 +22,7 @@
 #define _FILE_OFFSET_BITS 64
 #define _GNU_SOURCE
 
-#define FUSE_USE_VERSION 26
+#define FUSE_USE_VERSION 32
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,7 +69,8 @@ static int hash_size;
 static int backing_dir_fd;
 static pthread_mutex_t readdir_lock;
 
-static int efes_getattr(const char *path, struct stat *buf)
+static int efes_getattr(const char *path, struct stat *buf,
+			struct fuse_file_info *fi)
 {
 	int ret;
 
@@ -475,7 +476,8 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 }
 
 static int efes_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-			off_t offset, struct fuse_file_info *fi)
+			off_t offset, struct fuse_file_info *fi,
+			enum fuse_readdir_flags flags)
 {
 	int fd;
 	int ret;
@@ -486,8 +488,8 @@ static int efes_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		return 0;
 	}
 
-	filler(buf, ".", NULL, 0);
-	filler(buf, "..", NULL, 0);
+	filler(buf, ".", NULL, 0, 0);
+	filler(buf, "..", NULL, 0, 0);
 
 	pthread_mutex_lock(&readdir_lock);
 
@@ -539,7 +541,7 @@ static int efes_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		if (d_type != DT_REG)
 			continue;
 
-		filler(buf, dent->d_name, NULL, 0);
+		filler(buf, dent->d_name, NULL, 0, 0);
 	}
 
 	closedir(dirp);
@@ -550,7 +552,6 @@ out:
 	return ret;
 }
 
-#if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 9)
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
@@ -566,7 +567,6 @@ static int efes_fallocate(const char *path, int mode, off_t offset,
 
 	return 0;
 }
-#endif
 
 static struct fuse_operations efes_oper = {
 	.getattr	= efes_getattr,
@@ -576,9 +576,7 @@ static struct fuse_operations efes_oper = {
 	.statfs		= efes_statfs,
 	.release	= efes_release,
 	.readdir	= efes_readdir,
-#if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 9)
 	.fallocate	= efes_fallocate,
-#endif
 };
 
 static void usage(const char *progname)
