@@ -17,7 +17,7 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#define PACKAGE_VERSION "0.1"
+#define PACKAGE_VERSION "0.2"
 
 #define _FILE_OFFSET_BITS 64
 #define _GNU_SOURCE
