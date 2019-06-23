@@ -44,7 +44,6 @@ static int freeze_fd[MAX_FREEZE];
 static int block_size = 1048576;
 static int hash_algo = GCRY_MD_SHA512;
 static int hash_size;
-static int cow_friendly;
 
 static int fd_src;
 static off_t sizeblocks;
@@ -108,41 +107,6 @@ static int check_signal(void)
 	return signal_quit_flag;
 }
 
-static void xpwrite_cowcheck(int fd, const void *buf,
-			     size_t count, off_t offset)
-{
-	uint8_t *readbuf;
-	ssize_t i;
-
-	if (!cow_friendly || count > 4194304) {
-		xpwrite(fd, buf, count, offset);
-		return;
-	}
-
-	readbuf = alloca(count);
-
-	i = xpread(fd, readbuf, count, offset);
-	if (i != count) {
-		fprintf(stderr, "xpwrite_cowcheck: read %Ld bytes "
-				"from offset %Ld where %Ld expected\n",
-			(long long)i, (long long)offset,
-			(long long)count);
-		xpwrite(fd, buf, count, offset);
-		return;
-	}
-
-	for (i = 0; i < count; i += 4096) {
-		int len;
-
-		len = count - i;
-		if (len > 4096)
-			len = 4096;
-
-		if (memcmp(buf + i, readbuf + i, len))
-			xpwrite(fd, buf + i, len, offset + i);
-	}
-}
-
 static void *copy_thread_no_hashmap(void *_me)
 {
 	struct worker_thread *me = _me;
@@ -187,7 +151,7 @@ static void *copy_thread_no_hashmap(void *_me)
 		xsem_wait(&me->sem1);
 
 		if (memcmp(dsthashmap + off * hash_size, hash, hash_size)) {
-			xpwrite_cowcheck(fd_dst, buf, ret, off * block_size);
+			xpwrite(fd_dst, buf, ret, off * block_size);
 			memcpy(dsthashmap + off * hash_size, hash, hash_size);
 			xpwrite(fd_dsthashmap, hash,
 				hash_size, off * hash_size);
@@ -276,7 +240,7 @@ static void *copy_thread_hashmap(void *_me)
 
 		xsem_wait(&me->sem1);
 
-		xpwrite_cowcheck(fd_dst, buf, ret, off * block_size);
+		xpwrite(fd_dst, buf, ret, off * block_size);
 
 		memcpy(dsthashmap + off * hash_size, hash, hash_size);
 		xpwrite(fd_dsthashmap, hash, hash_size, off * hash_size);
@@ -333,7 +297,6 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'c':
-			cow_friendly = 1;
 			break;
 
 		case 'h':
@@ -381,8 +344,6 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s: [opts] <src> <srchashmap> <dst> "
 				"<dsthashmap>\n", argv[0]);
 		fprintf(stderr, " -b, --block-size=SIZE    hash block size\n");
-		fprintf(stderr, " -c, --cow-friendly       try to avoid "
-				"breaking cow in dst\n");
 		fprintf(stderr, " -f, --freeze=MOUNTPOINT  freeze "
 				"filesystem\n");
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
