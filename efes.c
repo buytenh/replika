@@ -421,44 +421,40 @@ static void *commit_thread(void *_me)
 	return NULL;
 }
 
-static void update_mapfile(struct efes_file_info *fh, const char *path)
-{
-	uint64_t num_dirty;
-	uint64_t i;
-	struct commit_state cs;
-
-	num_dirty = 0;
-	for (i = 0; i < fh->numblocks; i++) {
-		if (dirty_test(fh, i))
-			num_dirty++;
-	}
-
-	if (num_dirty) {
-		if (stderr_is_tty()) {
-			fprintf(stderr, "committing %s (%Ld dirty blocks)\n",
-				path + 1, (long long)num_dirty);
-		}
-
-		cs.fh = fh;
-		cs.block = 0;
-		cs.dirty_index = 0;
-		cs.num_dirty = num_dirty;
-		run_threads(commit_thread, &cs);
-
-		if (stderr_is_tty())
-			fprintf(stderr, "commit done\n\n");
-	}
-}
-
 static int efes_release(const char *path, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
 
 	if (fh->writable) {
-		uint64_t numbg;
+		uint64_t num_dirty;
 		uint64_t i;
+		uint64_t numbg;
 
-		update_mapfile(fh, path);
+		num_dirty = 0;
+		for (i = 0; i < fh->numblocks; i++) {
+			if (dirty_test(fh, i))
+				num_dirty++;
+		}
+
+		if (num_dirty) {
+			struct commit_state cs;
+
+			if (stderr_is_tty()) {
+				fprintf(stderr, "committing %s (%Ld dirty "
+						"blocks)\n",
+					path + 1, (long long)num_dirty);
+			}
+
+			cs.fh = fh;
+			cs.block = 0;
+			cs.dirty_index = 0;
+			cs.num_dirty = num_dirty;
+			run_threads(commit_thread, &cs);
+
+			if (stderr_is_tty())
+				fprintf(stderr, "commit done\n\n");
+		}
+
 		close(fh->mapfd);
 
 		numbg = DIV_ROUND_UP(fh->numblocks, BG_SIZE);
