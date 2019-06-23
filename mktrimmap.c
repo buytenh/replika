@@ -111,7 +111,7 @@ static void *mktrimmap_thread(void *_me)
 
 		for (i = 0; i < block_size; i += TRIMMAP_PAGE_SIZE) {
 			if (!memcmp(buf + i, buf2 + i, TRIMMAP_PAGE_SIZE)) {
-				int blk = i / TRIMMAP_PAGE_SIZE;
+				int blk = i >> TRIMMAP_PAGE_SHIFT;
 
 				trimmap[blk / BITSPERBYTE] |=
 					1 << (blk % BITSPERBYTE);

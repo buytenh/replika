@@ -23,7 +23,8 @@
 #include <semaphore.h>
 #include <values.h>
 
-#define TRIMMAP_PAGE_SIZE	4096
+#define TRIMMAP_PAGE_SHIFT	12
+#define TRIMMAP_PAGE_SIZE	(1 << TRIMMAP_PAGE_SHIFT)
 #define TRIMMAP_BYTE_CHUNK	(BITSPERBYTE * TRIMMAP_PAGE_SIZE)
 
 struct worker_thread {
