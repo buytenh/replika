@@ -98,6 +98,28 @@ static int efes_getattr(const char *path, struct stat *buf)
 	return 0;
 }
 
+static void dirty_set(struct efes_file_info *fh, uint64_t block)
+{
+	struct block_group *bg;
+	unsigned int bgoff;
+
+	bg = &fh->bg[block / BG_SIZE];
+	bgoff = block % BG_SIZE;
+
+	bg->state[bgoff] = BLOCK_STATE_DIRTY;
+}
+
+static void dirty_clear(struct efes_file_info *fh, uint64_t block)
+{
+	struct block_group *bg;
+	unsigned int bgoff;
+
+	bg = &fh->bg[block / BG_SIZE];
+	bgoff = block % BG_SIZE;
+
+	bg->state[bgoff] = BLOCK_STATE_CLEAN;
+}
+
 static int efes_open(const char *path, struct fuse_file_info *fi)
 {
 	int len;
@@ -204,20 +226,15 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 		for (i = 0; i < numblocks; i++) {
 			uint8_t hash[hash_size];
 			int ret;
-			struct block_group *bg;
-			int bgoff;
 
 			ret = fread(hash, hash_size, 1, fp);
 			if (ret < 1)
 				fseek(fp, (i + 1) * block_size, SEEK_SET);
 
-			bg = &fh->bg[i / BG_SIZE];
-			bgoff = i % BG_SIZE;
-
 			if (ret < 1 || !memcmp(hash, dirty_hash, hash_size))
-				bg->state[bgoff] = BLOCK_STATE_DIRTY;
+				dirty_set(fh, i);
 			else
-				bg->state[bgoff] = BLOCK_STATE_CLEAN;
+				dirty_clear(fh, i);
 		}
 
 		fclose(fp);
@@ -236,18 +253,26 @@ static int efes_read(const char *path, char *buf, size_t size,
 	return pread(fh->imgfd, buf, size, offset);
 }
 
+static int dirty_test(struct efes_file_info *fh, uint64_t block)
+{
+	struct block_group *bg;
+	unsigned int bgoff;
+
+	bg = &fh->bg[block / BG_SIZE];
+	bgoff = block % BG_SIZE;
+
+	return bg->state[bgoff] == BLOCK_STATE_DIRTY;
+}
+
 static void make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 {
-	struct block_group *bg = &fh->bg[block / BG_SIZE];
-	int bgoff = block % BG_SIZE;
-
-	if (bg->state[bgoff] == BLOCK_STATE_CLEAN) {
+	if (!dirty_test(fh, block)) {
 		uint8_t hash[hash_size];
 
 		memset(hash, 0, hash_size);
 		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
-		bg->state[bgoff] = BLOCK_STATE_DIRTY;
+		dirty_set(fh, block);
 	}
 }
 
@@ -337,8 +362,6 @@ static void *commit_thread(void *_me)
 
 	while (1) {
 		off_t block;
-		struct block_group *bg;
-		int bgoff;
 		off_t off;
 		uint8_t buf[block_size];
 		int ret;
@@ -347,10 +370,7 @@ static void *commit_thread(void *_me)
 		xsem_wait(&me->sem0);
 
 		for (block = cs->block; block < fh->numblocks; block++) {
-			bg = &fh->bg[block / BG_SIZE];
-			bgoff = block % BG_SIZE;
-
-			if (bg->state[bgoff] != BLOCK_STATE_CLEAN)
+			if (dirty_test(fh, block))
 				break;
 		}
 
@@ -401,9 +421,7 @@ static void update_mapfile(struct efes_file_info *fh, const char *path)
 
 	num_dirty = 0;
 	for (i = 0; i < fh->numblocks; i++) {
-		struct block_group *bg = &fh->bg[i / BG_SIZE];
-
-		if (bg->state[i % BG_SIZE] != BLOCK_STATE_CLEAN)
+		if (dirty_test(fh, i))
 			num_dirty++;
 	}
 
