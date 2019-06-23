@@ -34,6 +34,7 @@
 #include <limits.h>
 #include <linux/falloc.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -56,6 +57,8 @@ struct efes_file_info
 	uint64_t	file_size;
 	uint64_t	numblocks;
 	int		mapfd;
+	size_t		trimmap_size;
+	uint8_t		*trimmap;
 	struct block_group	bg[0];
 };
 
@@ -172,10 +175,14 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	int len;
 	int writable;
 	int imgfd;
+	int mapfd;
 	struct stat buf;
 	int ret;
-	int mapfd;
 	uint64_t numblocks;
+	char *trimmappath;
+	int trimmapfd;
+	size_t trimmap_size;
+	uint8_t *trimmap;
 	uint64_t numbg;
 	struct efes_file_info *fh;
 	uint64_t i;
@@ -221,10 +228,49 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	}
 
 	numblocks = DIV_ROUND_UP(buf.st_size, block_size);
+
+	trimmappath = alloca(len + 5);
+	strcpy(trimmappath, path);
+	strcpy(trimmappath + len - 4, ".trimmap");
+
+	trimmapfd = openat(backing_dir_fd, trimmappath + 1,
+			   writable ? O_RDWR : O_RDONLY);
+	if (trimmapfd < 0 && errno != ENOENT) {
+		fprintf(stderr, "efes_open: trimmapfile %s openat %s\n",
+			trimmappath, strerror(errno));
+		if (writable)
+			close(mapfd);
+		close(imgfd);
+		return -EPERM;
+	}
+
+	trimmap_size = 0;
+	trimmap = NULL;
+	if (trimmapfd >= 0) {
+		trimmap_size = DIV_ROUND_UP(numblocks * block_size,
+					    TRIMMAP_BYTE_CHUNK);
+
+		trimmap = mmap(NULL, trimmap_size,
+			       PROT_READ | (writable ? PROT_WRITE : 0),
+			       MAP_SHARED, trimmapfd, 0);
+		if (trimmap == MAP_FAILED) {
+			fprintf(stderr, "efes_open: trimmapfile %s mmap %s\n",
+				trimmappath, strerror(errno));
+			if (writable)
+				close(mapfd);
+			close(imgfd);
+			return -EPERM;
+		}
+
+		close(trimmapfd);
+	}
+
 	numbg = DIV_ROUND_UP(numblocks, BG_SIZE);
 
 	fh = malloc(sizeof(*fh) + numbg * sizeof(fh->bg[0]));
 	if (fh == NULL) {
+		if (trimmap != NULL)
+			munmap(trimmap, trimmap_size);
 		if (writable)
 			close(mapfd);
 		close(imgfd);
@@ -236,11 +282,15 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->file_size = buf.st_size;
 	fh->numblocks = numblocks;
 	fh->mapfd = mapfd;
+	fh->trimmap_size = trimmap_size;
+	fh->trimmap = trimmap;
 
 	for (i = 0; i < numbg; i++)
 		pthread_rwlock_init(&fh->bg[i].lock, NULL);
 
 	if (writable && init_dirty_map(fh, numblocks)) {
+		if (trimmap != NULL)
+			munmap(trimmap, trimmap_size);
 		close(mapfd);
 		close(imgfd);
 		free(fh);
@@ -429,6 +479,9 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 	struct efes_file_info *fh = (void *)fi->fh;
 	uint64_t i;
 	uint64_t numbg;
+
+	if (fh->trimmap != NULL)
+		munmap(fh->trimmap, fh->trimmap_size);
 
 	if (fh->writable) {
 		uint64_t num_dirty;
