@@ -135,12 +135,6 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 
-			if ((block_size & 7) != 0) {
-				fprintf(stderr, "error: block size must be "
-						"a multiple of 8\n");
-				return 1;
-			}
-
 			break;
 
 		case 'h':
@@ -165,6 +159,12 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s: [opts] <image> <hashmap>\n", argv[0]);
 		fprintf(stderr, " -b, --block-size=SIZE    hash block size\n");
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
+		return 1;
+	}
+
+	if (block_size <= 0 || block_size % TRIMMAP_BYTE_CHUNK) {
+		fprintf(stderr, "block size must be a multiple of %d\n",
+			TRIMMAP_BYTE_CHUNK);
 		return 1;
 	}
 

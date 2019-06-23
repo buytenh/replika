@@ -954,13 +954,13 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (param.block_size) {
-		if ((param.block_size & 7) != 0) {
-			fprintf(stderr, "error: block size must be "
-					"a multiple of 8\n");
-			return 1;
-		}
+	if (param.block_size)
 		block_size = param.block_size;
+
+	if (block_size <= 0 || block_size % TRIMMAP_BYTE_CHUNK) {
+		fprintf(stderr, "block size must be a multiple of %d\n",
+			TRIMMAP_BYTE_CHUNK);
+		return 1;
 	}
 
 	if (param.hash_algo != NULL) {

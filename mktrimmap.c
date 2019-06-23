@@ -177,12 +177,6 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 
-			if ((block_size & 7) != 0) {
-				fprintf(stderr, "error: block size must be "
-						"a multiple of 8\n");
-				return 1;
-			}
-
 			break;
 
 		case 'c':
@@ -211,9 +205,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (block_size % TRIMMAP_BYTE_CHUNK) {
-		fprintf(stderr, "block size must be a multiple "
-				"of %d\n", TRIMMAP_BYTE_CHUNK);
+	if (block_size <= 0 || block_size % TRIMMAP_BYTE_CHUNK) {
+		fprintf(stderr, "block size must be a multiple of %d\n",
+			TRIMMAP_BYTE_CHUNK);
 		return 1;
 	}
 
