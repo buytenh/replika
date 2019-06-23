@@ -236,26 +236,18 @@ static int efes_read(const char *path, char *buf, size_t size,
 	return pread(fh->imgfd, buf, size, offset);
 }
 
-static void __make_dirty_for_writing(struct efes_file_info *fh, off_t block)
+static void make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 {
 	struct block_group *bg = &fh->bg[block / BG_SIZE];
 	int bgoff = block % BG_SIZE;
 
-	while (bg->state[bgoff] != BLOCK_STATE_DIRTY) {
-		pthread_rwlock_unlock(&bg->lock);
+	if (bg->state[bgoff] == BLOCK_STATE_CLEAN) {
+		uint8_t hash[hash_size];
 
-		pthread_rwlock_wrlock(&bg->lock);
-		if (bg->state[bgoff] == BLOCK_STATE_CLEAN) {
-			uint8_t hash[hash_size];
+		memset(hash, 0, hash_size);
+		xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
 
-			memset(hash, 0, hash_size);
-			xpwrite(fh->mapfd, hash, hash_size, block * hash_size);
-
-			bg->state[bgoff] = BLOCK_STATE_DIRTY;
-		}
-		pthread_rwlock_unlock(&bg->lock);
-
-		pthread_rwlock_rdlock(&bg->lock);
+		bg->state[bgoff] = BLOCK_STATE_DIRTY;
 	}
 }
 
@@ -293,9 +285,9 @@ static int efes_write(const char *path, const char *buf, size_t size,
 		block = offset / block_size;
 		bg = &fh->bg[block / BG_SIZE];
 
-		pthread_rwlock_rdlock(&bg->lock);
+		pthread_rwlock_wrlock(&bg->lock);
 
-		__make_dirty_for_writing(fh, block);
+		make_dirty_for_writing(fh, block);
 
 		ret = pwrite(fh->imgfd, buf, towrite, offset);
 
