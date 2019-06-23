@@ -134,6 +134,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	uint64_t numblocks;
 	uint64_t numbg;
 	struct efes_file_info *fh;
+	uint64_t i;
 
 	if (path[0] != '/') {
 		fprintf(stderr, "open called with [%s]\n", path);
@@ -176,7 +177,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	}
 
 	numblocks = DIV_ROUND_UP(buf.st_size, block_size);
-	numbg = writable ? DIV_ROUND_UP(numblocks, BG_SIZE) : 0;
+	numbg = DIV_ROUND_UP(numblocks, BG_SIZE);
 
 	fh = malloc(sizeof(*fh) + numbg * sizeof(fh->bg[0]));
 	if (fh == NULL) {
@@ -191,12 +192,15 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->file_size = buf.st_size;
 	fh->numblocks = numblocks;
 	fh->mapfd = mapfd;
+
+	for (i = 0; i < numbg; i++)
+		pthread_rwlock_init(&fh->bg[i].lock, NULL);
+
 	if (writable) {
 		uint8_t dirty_hash[hash_size];
 		int mapfd2;
 		FILE *fp;
 		char mapbuf[1048576];
-		uint64_t i;
 
 		memset(dirty_hash, 0, sizeof(dirty_hash));
 
@@ -222,9 +226,6 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 		}
 
 		setbuffer(fp, mapbuf, sizeof(mapbuf));
-
-		for (i = 0; i < numbg; i++)
-			pthread_rwlock_init(&fh->bg[i].lock, NULL);
 
 		for (i = 0; i < numblocks; i++) {
 			uint8_t hash[hash_size];
@@ -423,11 +424,11 @@ static void *commit_thread(void *_me)
 static int efes_release(const char *path, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
+	uint64_t i;
+	uint64_t numbg;
 
 	if (fh->writable) {
 		uint64_t num_dirty;
-		uint64_t i;
-		uint64_t numbg;
 
 		num_dirty = 0;
 		for (i = 0; i < fh->numblocks; i++) {
@@ -455,12 +456,14 @@ static int efes_release(const char *path, struct fuse_file_info *fi)
 		}
 
 		close(fh->mapfd);
-
-		numbg = DIV_ROUND_UP(fh->numblocks, BG_SIZE);
-		for (i = 0; i < numbg; i++)
-			pthread_rwlock_destroy(&fh->bg[i].lock);
 	}
+
+	numbg = DIV_ROUND_UP(fh->numblocks, BG_SIZE);
+	for (i = 0; i < numbg; i++)
+		pthread_rwlock_destroy(&fh->bg[i].lock);
+
 	close(fh->imgfd);
+
 	free(fh);
 
 	return 0;
