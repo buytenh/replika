@@ -29,11 +29,7 @@
 #include <semaphore.h>
 #include <stdint.h>
 #include <unistd.h>
-#include <values.h>
 #include "common.h"
-
-#define TRIMMAP_PAGE_SIZE	4096
-#define TRIMMAP_BYTE_CHUNK	(BITSPERBYTE * TRIMMAP_PAGE_SIZE)
 
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
 

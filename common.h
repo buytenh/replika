@@ -21,6 +21,10 @@
 #define __COMMON_H
 
 #include <semaphore.h>
+#include <values.h>
+
+#define TRIMMAP_PAGE_SIZE	4096
+#define TRIMMAP_BYTE_CHUNK	(BITSPERBYTE * TRIMMAP_PAGE_SIZE)
 
 struct worker_thread {
 	sem_t sem0;
