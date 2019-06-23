@@ -7,7 +7,7 @@ dedup:		dedup.c dedup.h dedup_scan.c common.c common.h extents.c extents.h
 		gcc -Wall -o dedup dedup.c dedup_scan.c common.c extents.c `libgcrypt-config --cflags --libs` `pkg-config --cflags --libs ivykis` -lpthread
 
 efes:		efes.c common.c common.h
-		gcc -Wall -o efes efes.c common.c `pkg-config fuse --cflags --libs` `libgcrypt-config --cflags --libs` -lpthread
+		gcc -Wall -o efes efes.c common.c `pkg-config fuse3 --cflags --libs` `libgcrypt-config --cflags --libs` -lpthread
 
 mkhashmap:	mkhashmap.c common.c common.h
 		gcc -Wall -o mkhashmap mkhashmap.c common.c `libgcrypt-config --cflags --libs` -lpthread
