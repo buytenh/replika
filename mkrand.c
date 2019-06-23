@@ -154,12 +154,6 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 
-			if ((block_size & 7) != 0) {
-				fprintf(stderr, "error: block size must be "
-						"a multiple of 8\n");
-				return 1;
-			}
-
 			break;
 
 		case 'c':
@@ -196,6 +190,11 @@ int main(int argc, char *argv[])
 		fprintf(stderr, " -b, --block-size=SIZE    hash block size\n");
 		fprintf(stderr, " -c, --cipher-algo=ALGO   cipher algorithm\n");
 		fprintf(stderr, " -h, --hash-algo=ALGO     hash algorithm\n");
+		return 1;
+	}
+
+	if (block_size <= 0 || (block_size & 7) != 0) {
+		fprintf(stderr, "block size must be a multiple of 8\n");
 		return 1;
 	}
 
