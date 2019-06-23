@@ -302,12 +302,87 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
+static size_t until(uint64_t offset, size_t size, size_t next_boundary)
+{
+	uint64_t until;
+
+	until = next_boundary - (offset % next_boundary);
+	if (until > size)
+		until = size;
+
+	return until;
+}
+
+static int trimmap_test(struct efes_file_info *fh, uint64_t offset)
+{
+	if (fh->trimmap != NULL) {
+		uint64_t page = offset >> TRIMMAP_PAGE_SHIFT;
+		size_t byte = page / BITSPERBYTE;
+		uint8_t mask = 1 << (page % BITSPERBYTE);
+
+		return !!(fh->trimmap[byte] & mask);
+	}
+
+	return 0;
+}
+
 static int efes_read(const char *path, char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
+	ssize_t processed;
 
-	return pread(fh->imgfd, buf, size, offset);
+	if (offset < 0)
+		return -EINVAL;
+	if (offset >= fh->file_size)
+		return 0;
+
+	if (size > INT_MAX)
+		size = INT_MAX;
+	if (offset + size > fh->file_size)
+		size = fh->file_size - offset;
+
+	processed = 0;
+	while (size) {
+		struct block_group *bg;
+		size_t toread_bg;
+
+		bg = &fh->bg[(uint64_t)offset / (BG_SIZE * block_size)];
+
+		pthread_rwlock_rdlock(&bg->lock);
+
+		toread_bg = until(offset, size, BG_SIZE * block_size);
+		while (toread_bg) {
+			size_t toread_pg;
+			int ret;
+
+			toread_pg = until(offset, size, TRIMMAP_PAGE_SIZE);
+			if (toread_pg > toread_bg)
+				toread_pg = toread_bg;
+
+			if (trimmap_test(fh, offset)) {
+				memset(buf, 0, toread_pg);
+				ret = toread_pg;
+			} else {
+				ret = pread(fh->imgfd, buf, toread_pg, offset);
+				if (ret <= 0) {
+					pthread_rwlock_unlock(&bg->lock);
+					return processed ? processed : -EIO;
+				}
+			}
+
+			buf += ret;
+			size -= ret;
+			offset += ret;
+
+			processed += ret;
+			toread_bg -= ret;
+		}
+
+		pthread_rwlock_unlock(&bg->lock);
+	}
+
+	return processed;
 }
 
 static int dirty_test(struct efes_file_info *fh, uint64_t block)
@@ -337,55 +412,101 @@ static void make_dirty_for_writing(struct efes_file_info *fh, off_t block)
 	}
 }
 
+static int clear_range(struct efes_file_info *fh, uint64_t offset, size_t len)
+{
+	uint8_t buf[len];
+
+	memset(buf, 0, len);
+
+	return !!(pwrite(fh->imgfd, buf, len, offset) != len);
+}
+
+static int prep_partial_page_write(struct efes_file_info *fh, uint64_t offset)
+{
+	if (!trimmap_test(fh, offset))
+		return 0;
+
+	return clear_range(fh, offset & ~((uint64_t)TRIMMAP_PAGE_SIZE - 1),
+			   TRIMMAP_PAGE_SIZE);
+}
+
+static void trimmap_clear(struct efes_file_info *fh, uint64_t offset)
+{
+	if (fh->trimmap != NULL) {
+		uint64_t page = offset >> TRIMMAP_PAGE_SHIFT;
+		size_t byte = page / BITSPERBYTE;
+		uint8_t mask = 1 << (page % BITSPERBYTE);
+
+		fh->trimmap[byte] &= ~mask;
+	}
+}
+
 static int efes_write(const char *path, const char *buf, size_t size,
 		      off_t offset, struct fuse_file_info *fi)
 {
 	struct efes_file_info *fh = (void *)fi->fh;
-	off_t processed;
+	ssize_t processed;
 
 	if (!fh->writable)
 		return -EBADF;
 
+	if (offset < 0)
+		return -EINVAL;
 	if (offset >= fh->file_size)
 		return -ENOSPC;
 
 	if (size > INT_MAX)
 		size = INT_MAX;
+	if (offset + size > fh->file_size)
+		size = fh->file_size - offset;
 
 	processed = 0;
-	while (processed < size) {
-		size_t towrite;
-		off_t block;
+	while (size) {
+		uint64_t block;
 		struct block_group *bg;
-		int ret;
+		size_t towrite_block;
 
-		if (offset >= fh->file_size)
-			break;
-
-		towrite = size - processed;
-		if (offset + towrite > fh->file_size)
-			towrite = fh->file_size - offset;
-		if (towrite > block_size - (offset % block_size))
-			towrite = block_size - (offset % block_size);
-
-		block = offset / block_size;
+		block = (uint64_t)offset / block_size;
 		bg = &fh->bg[block / BG_SIZE];
 
 		pthread_rwlock_wrlock(&bg->lock);
 
 		make_dirty_for_writing(fh, block);
 
-		ret = pwrite(fh->imgfd, buf, towrite, offset);
+		towrite_block = until(offset, size, block_size);
+		while (towrite_block) {
+			size_t towrite_pg;
+			int ret;
+
+			towrite_pg = until(offset, size, TRIMMAP_PAGE_SIZE);
+			if (towrite_pg > towrite_block)
+				towrite_pg = towrite_block;
+
+			if (towrite_pg != TRIMMAP_PAGE_SIZE &&
+			    prep_partial_page_write(fh, offset)) {
+				pthread_rwlock_unlock(&bg->lock);
+				return processed ? processed : -EIO;
+			}
+
+			ret = pwrite(fh->imgfd, buf, towrite_pg, offset);
+			if (ret != towrite_pg) {
+				pthread_rwlock_unlock(&bg->lock);
+				if (ret > 0)
+					processed += ret;
+				return processed ? processed : -EIO;
+			}
+
+			trimmap_clear(fh, offset);
+
+			buf += ret;
+			size -= ret;
+			offset += ret;
+
+			processed += ret;
+			towrite_block -= ret;
+		}
 
 		pthread_rwlock_unlock(&bg->lock);
-
-		if (ret < 0)
-			return processed ? processed : -errno;
-
-		buf += ret;
-		offset += ret;
-
-		processed += ret;
 	}
 
 	return processed;
@@ -602,18 +723,69 @@ out:
 }
 
 #if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 9)
+static void trimmap_set(struct efes_file_info *fh, uint64_t offset)
+{
+	if (fh->trimmap != NULL) {
+		uint64_t page = offset >> TRIMMAP_PAGE_SHIFT;
+		size_t byte = page / BITSPERBYTE;
+		uint8_t mask = 1 << (page % BITSPERBYTE);
+
+		fh->trimmap[byte] |= mask;
+	}
+}
+
 static int efes_fallocate(const char *path, int mode, off_t offset,
 			  off_t len, struct fuse_file_info *fi)
 {
-	if (!(mode & FALLOC_FL_PUNCH_HOLE))
+	struct efes_file_info *fh = (void *)fi->fh;
+
+	if (mode != (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE))
+		return -EOPNOTSUPP;
+
+	if (!fh->writable)
+		return -EBADF;
+
+	if (offset < 0 || offset >= fh->file_size)
+		return -EINVAL;
+	if (len == 0 || fh->file_size - offset < len)
 		return -EINVAL;
 
-	if (offset & 511)
-		return -EINVAL;
-	if (len & 511)
-		return -EINVAL;
-	if (len < 512)
-		return -EINVAL;
+	while (len) {
+		uint64_t block;
+		struct block_group *bg;
+		size_t totrim_block;
+
+		block = offset / block_size;
+		bg = &fh->bg[block / BG_SIZE];
+
+		pthread_rwlock_wrlock(&bg->lock);
+
+		totrim_block = until(offset, len, block_size);
+		while (totrim_block) {
+			size_t totrim_pg;
+
+			totrim_pg = until(offset, len, TRIMMAP_PAGE_SIZE);
+			if (totrim_pg > totrim_block)
+				totrim_pg = totrim_block;
+
+			if (totrim_pg != TRIMMAP_PAGE_SIZE) {
+				make_dirty_for_writing(fh, block);
+				if (clear_range(fh, offset, totrim_pg)) {
+					pthread_rwlock_unlock(&bg->lock);
+					return -EIO;
+				}
+			} else {
+				trimmap_set(fh, offset);
+			}
+
+			offset += totrim_pg;
+			len -= totrim_pg;
+
+			totrim_block -= totrim_pg;
+		}
+
+		pthread_rwlock_unlock(&bg->lock);
+	}
 
 	return 0;
 }
