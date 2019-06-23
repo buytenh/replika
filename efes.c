@@ -124,6 +124,50 @@ static void dirty_clear(struct efes_file_info *fh, uint64_t block)
 	bg->dirty[bgbyte] &= ~bgmask;
 }
 
+static int init_dirty_map(struct efes_file_info *fh, uint64_t numblocks)
+{
+	uint8_t dirty_hash[hash_size];
+	int mapfd;
+	FILE *fp;
+	char mapbuf[1048576];
+	uint64_t i;
+
+	memset(dirty_hash, 0, sizeof(dirty_hash));
+
+	mapfd = dup(fh->mapfd);
+	if (mapfd < 0) {
+		perror("dup");
+		return 1;
+	}
+
+	fp = fdopen(mapfd, "r");
+	if (fp == NULL) {
+		perror("fdopen");
+		close(mapfd);
+		return 1;
+	}
+
+	setbuffer(fp, mapbuf, sizeof(mapbuf));
+
+	for (i = 0; i < numblocks; i++) {
+		uint8_t hash[hash_size];
+		int ret;
+
+		ret = fread(hash, hash_size, 1, fp);
+		if (ret < 1)
+			fseek(fp, (i + 1) * block_size, SEEK_SET);
+
+		if (ret < 1 || !memcmp(hash, dirty_hash, hash_size))
+			dirty_set(fh, i);
+		else
+			dirty_clear(fh, i);
+	}
+
+	fclose(fp);
+
+	return 0;
+}
+
 static int efes_open(const char *path, struct fuse_file_info *fi)
 {
 	int len;
@@ -192,56 +236,19 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 	fh->file_size = buf.st_size;
 	fh->numblocks = numblocks;
 	fh->mapfd = mapfd;
+
 	if (writable) {
-		uint8_t dirty_hash[hash_size];
-		int mapfd2;
-		FILE *fp;
-		char mapbuf[1048576];
 		uint64_t i;
 
-		memset(dirty_hash, 0, sizeof(dirty_hash));
-
-		mapfd2 = dup(mapfd);
-		if (mapfd2 < 0) {
-			perror("dup");
-			if (writable)
-				close(mapfd);
+		if (init_dirty_map(fh, numblocks)) {
+			close(mapfd);
 			close(imgfd);
 			free(fh);
 			return -EIO;
 		}
-
-		fp = fdopen(mapfd2, "r");
-		if (fp == NULL) {
-			perror("fdopen");
-			close(mapfd2);
-			if (writable)
-				close(mapfd);
-			close(imgfd);
-			free(fh);
-			return -EIO;
-		}
-
-		setbuffer(fp, mapbuf, sizeof(mapbuf));
 
 		for (i = 0; i < numbg; i++)
 			pthread_rwlock_init(&fh->bg[i].lock, NULL);
-
-		for (i = 0; i < numblocks; i++) {
-			uint8_t hash[hash_size];
-			int ret;
-
-			ret = fread(hash, hash_size, 1, fp);
-			if (ret < 1)
-				fseek(fp, (i + 1) * block_size, SEEK_SET);
-
-			if (ret < 1 || !memcmp(hash, dirty_hash, hash_size))
-				dirty_set(fh, i);
-			else
-				dirty_clear(fh, i);
-		}
-
-		fclose(fp);
 	}
 
 	fi->fh = (uint64_t)fh;
