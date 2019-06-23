@@ -102,7 +102,6 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 {
 	int len;
 	int writable;
-	int flags;
 	int imgfd;
 	struct stat buf;
 	int ret;
@@ -122,11 +121,7 @@ static int efes_open(const char *path, struct fuse_file_info *fi)
 
 	writable = !((fi->flags & O_ACCMODE) == O_RDONLY);
 
-	flags = fi->flags;
-	if ((flags & O_ACCMODE) == O_WRONLY)
-		flags = (flags & ~O_ACCMODE) | O_RDWR;
-
-	imgfd = openat(backing_dir_fd, path + 1, flags);
+	imgfd = openat(backing_dir_fd, path + 1, writable ? O_RDWR : O_RDONLY);
 	if (imgfd < 0)
 		return -errno;
 
