@@ -55,12 +55,9 @@ static void *hash_thread(void *_me)
 
 		off = fd_off++;
 
-		posix_fadvise(fd_src, off * block_size, 4 * block_size,
-				POSIX_FADV_WILLNEED);
+		xsem_post(&me->next->sem0);
 
 		ret = xpread(fd_src, buf, block_size, off * block_size);
-
-		xsem_post(&me->next->sem0);
 
 		if ((ret < block_size && off != sizeblocks - 1) ||
 		    (ret <= 0 && off == sizeblocks - 1)) {

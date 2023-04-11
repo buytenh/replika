@@ -133,12 +133,9 @@ static void *copy_thread_no_hashmap(void *_me)
 
 		fd_off++;
 
-		posix_fadvise(fd_src, off * block_size, 4 * block_size,
-				POSIX_FADV_WILLNEED);
+		xsem_post(&me->next->sem0);
 
 		ret = xpread(fd_src, buf, block_size, off * block_size);
-
-		xsem_post(&me->next->sem0);
 
 		if ((ret < block_size && off != sizeblocks - 1) ||
 		    (ret <= 0 && off == sizeblocks - 1)) {
@@ -217,12 +214,12 @@ static void *copy_thread_hashmap(void *_me)
 			fputs(str, stderr);
 		}
 
-		ret = xpread(fd_src, buf, block_size, off * block_size);
-
 		fd_off = off + 1;
 		mismatch_idx++;
 
 		xsem_post(&me->next->sem0);
+
+		ret = xpread(fd_src, buf, block_size, off * block_size);
 
 		if ((ret < block_size && off != sizeblocks - 1) ||
 		    (ret <= 0 && off == sizeblocks - 1)) {
