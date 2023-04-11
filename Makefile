@@ -1,7 +1,7 @@
-all:		dedup efes mkhashmap mkrand mktrimmap replika uniques
+all:		dedup efes mkhashmap mkrand replika uniques
 
 clean:
-		rm -f dedup efes mkhashmap mkrand mktrimmap replika uniques
+		rm -f dedup efes mkhashmap mkrand replika uniques
 
 dedup:		dedup.c dedup.h dedup_scan.c common.c common.h extents.c extents.h
 		gcc -Wall -o dedup dedup.c dedup_scan.c common.c extents.c `libgcrypt-config --cflags --libs` `pkg-config --cflags --libs ivykis` -lpthread
@@ -14,9 +14,6 @@ mkhashmap:	mkhashmap.c common.c common.h
 
 mkrand:		mkrand.c common.c common.h
 		gcc -Wall -o mkrand mkrand.c common.c `libgcrypt-config --cflags --libs` -lpthread
-
-mktrimmap:	mktrimmap.c common.c common.h
-		gcc -Wall -o mktrimmap mktrimmap.c common.c `libgcrypt-config --cflags --libs` -lpthread
 
 replika:	replika.c common.c common.h
 		gcc -Wall -o replika replika.c common.c `libgcrypt-config --cflags --libs` -lpthread
